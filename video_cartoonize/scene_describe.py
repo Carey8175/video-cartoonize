@@ -54,16 +54,15 @@ def _seedream_i2i(
 
 
 def _extract_last_frame(clip_path: str, out_dir: str, clip_id: int) -> Optional[str]:
-    cmd_dur = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-               "-of", "default=nw=1:nk=1", clip_path]
-    try:
-        dur = float(subprocess.check_output(cmd_dur, text=True).strip())
-    except Exception:
-        return None
-    seek = max(0.0, dur - 0.1)
+    """提取 clip 真正的最后一帧。
+
+    用 -sseof -0 从文件末尾反向 seek，保证拿到的是实际最后一帧，
+    而不是快速 seek（-ss before -i）跳到的最近关键帧。
+    """
     dst = os.path.join(out_dir, f"clip_{clip_id:02d}_last_frame.jpg")
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-ss", f"{seek:.3f}", "-i", clip_path,
+           "-sseof", "-0.001",        # 从文件末尾反向 seek 0.001s
+           "-i", clip_path,
            "-frames:v", "1", "-update", "1", dst]
     try:
         subprocess.run(cmd, check=True)
@@ -103,8 +102,8 @@ def extract_keyframes(
     # 比较实际提取的帧时间戳（两端都有 0.1s nudge），而非原始边界时间
     dur = _get_duration(clip_path)
     last_kf_time = subshot_kfs[-1][0] if subshot_kfs else 0.0
-    last_kf_actual  = max(0.05, last_kf_time + 0.1)  # 子镜头帧实际提取时刻
-    last_frm_actual = max(0.0, dur - 0.1)             # last frame 实际提取时刻
+    last_kf_actual  = max(0.05, last_kf_time + 0.1)  # 子镜头帧实际提取时刻（含 nudge）
+    last_frm_actual = dur                             # -sseof 保证拿到真正最后一帧
     need_last = dur > 0 and (last_frm_actual - last_kf_actual) > last_frame_min_gap
 
     added_last = False
