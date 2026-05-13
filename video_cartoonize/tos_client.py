@@ -14,7 +14,7 @@ import tos
 from video_cartoonize.settings import ARK_AK_SK_FILE, TOS_CREDS_FILE
 
 # TOS 默认值（BytePlus 国际站，ap-southeast-1）
-_DEFAULT_ENDPOINT = "tos-ap-southeast-1.volces.com"
+_DEFAULT_ENDPOINT = "tos-ap-southeast-1.bytepluses.com"
 _DEFAULT_REGION   = "ap-southeast-1"
 
 

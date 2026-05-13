@@ -56,7 +56,7 @@ cartoonize doctor    # 检查缺少哪些凭证
 | `tos_credentials.json` | `{"bucket":"your-bucket"}` | TOS bucket 名（AK/SK 自动复用上面那组）|
 
 > **说明**：ARK AK/SK 和 TOS AK/SK 是同一组密钥，无需重复填写。  
-> TOS endpoint 默认 `tos-ap-southeast-1.volces.com`，无需填写；如需覆盖可在 `tos_credentials.json` 中加 `"endpoint"` 字段。
+> TOS endpoint 默认 `tos-ap-southeast-1.bytepluses.com`，无需填写；如需覆盖可在 `tos_credentials.json` 中加 `"endpoint"` 字段。
 
 也可以用环境变量：`ARK_API_KEY`、`ARK_AK` / `ARK_SK`、`TOS_BUCKET`。
 
