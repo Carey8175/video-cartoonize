@@ -6,7 +6,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional
 
-from video_cartoonize.sub_shot_detect import detect_sub_shots, extract_sub_shot_keyframes
+from video_cartoonize.sub_shot_detect import extract_sub_shot_keyframes
 
 _ARK_IMAGE_URL = "https://ark.ap-southeast.bytepluses.com/api/v3/images/generations"
 
@@ -89,91 +89,48 @@ def _get_duration(clip_path: str) -> float:
         return 0.0
 
 
-def _extract_frame_at(clip_path: str, seek: float, dst: str) -> Optional[str]:
-    """Accurate seek 提取指定时间的一帧 JPEG。"""
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-i", clip_path,                # input 在前 → accurate seek
-           "-ss", f"{seek:.3f}",
-           "-frames:v", "1", "-update", "1", dst]
-    try:
-        subprocess.run(cmd, check=True)
-        return dst if os.path.exists(dst) and os.path.getsize(dst) > 0 else None
-    except subprocess.CalledProcessError:
-        return None
-
-
 def extract_keyframes(
     clip_path: str,
     out_dir: str,
     clip_id: int,
     threshold: float = 27.0,
     last_frame_min_gap: float = 1.0,
-    max_gap: float = 2.0,
 ) -> List[str]:
-    """Phase 2a — 提取关键帧，保证时间均匀覆盖。
+    """Phase 2a — sub-shot first frames + last frame for one clip.
 
-    生成的关键帧 = 子镜头首帧 + (可选) 末帧 + 大间隔内的等距填充帧。
-
-    参数:
-        threshold: 子镜头检测阈值（PySceneDetect ContentDetector）
-        last_frame_min_gap: 末帧与最后一个子镜头帧的最小时间差，小于此值不加末帧
-        max_gap: 任意两个相邻关键帧的最大允许时间差，超过则按 max_gap 等距填充
+    last_frame_min_gap: 最后一个子镜头关键帧与片尾的最小间隔（秒）。
+    间隔小于此值时不提取 last frame，避免相邻关键帧过近导致视频跳变。
     """
     clip_frame_dir = os.path.join(out_dir, f"clip_{clip_id:02d}")
     os.makedirs(clip_frame_dir, exist_ok=True)
 
-    # 1) 子镜头边界（每个都会作为关键帧）
-    boundaries = detect_sub_shots(clip_path, threshold=threshold)
+    subshot_kfs = extract_sub_shot_keyframes(clip_path, clip_frame_dir, threshold=threshold)
+    paths = [p for _t, p in subshot_kfs]
+
+    # 只有最后一个子镜头关键帧距片尾超过 last_frame_min_gap 才追加 last frame
+    # 比较实际提取的帧时间戳（两端都有 0.1s nudge），而非原始边界时间
     dur = _get_duration(clip_path)
+    last_kf_time = subshot_kfs[-1][0] if subshot_kfs else 0.0
+    last_kf_actual  = max(0.05, last_kf_time + 0.1)  # 子镜头帧实际提取时刻（含 nudge）
+    last_frm_actual = dur                             # -sseof 保证拿到真正最后一帧
+    need_last = dur > 0 and (last_frm_actual - last_kf_actual) > last_frame_min_gap
 
-    # 2) 构造目标时间列表（含 nudge 后的实际取帧时刻）
-    target_times: List[float] = []
-    for t in boundaries:
-        target_times.append(max(0.05, t + 0.1))  # 子镜头首帧 nudge
+    added_last = False
+    if need_last:
+        last = _extract_last_frame(clip_path, clip_frame_dir, clip_id)
+        if last:
+            paths.append(last)
+            added_last = True
 
-    # 3) 末帧（若距最后子镜头帧 > last_frame_min_gap）
-    add_last = False
-    if dur > 0 and target_times and (dur - target_times[-1]) > last_frame_min_gap:
-        target_times.append(max(0.0, dur - 0.05))
-        add_last = True
-
-    # 4) 检查相邻间隔，> max_gap 的位置插入等距填充帧
-    filled: List[float] = [target_times[0]]
-    insert_count = 0
-    for i in range(1, len(target_times)):
-        gap = target_times[i] - target_times[i - 1]
-        if gap > max_gap:
-            n = int(gap // max_gap)              # 需要插入的帧数
-            step = gap / (n + 1)
-            for j in range(1, n + 1):
-                filled.append(round(target_times[i - 1] + j * step, 3))
-                insert_count += 1
-        filled.append(target_times[i])
-
-    # 5) 提取每个时间点的帧到 jpg
-    paths: List[str] = []
-    sub_idx = 0
-    fill_idx = 0
-    for t in filled:
-        # 判断是哪种帧（用于文件名）
-        if t in target_times[:len(boundaries)]:
-            name = f"sub_{sub_idx:02d}_t{t:.2f}.jpg"
-            sub_idx += 1
-        elif add_last and t == target_times[-1]:
-            name = f"last_frame_t{t:.2f}.jpg"
-        else:
-            name = f"fill_{fill_idx:02d}_t{t:.2f}.jpg"
-            fill_idx += 1
-        dst = os.path.join(clip_frame_dir, f"clip_{clip_id:02d}_{name}")
-        got = _extract_frame_at(clip_path, t, dst)
-        if got:
-            paths.append(got)
-
-    print(
-        f"[Phase 2a] clip {clip_id:02d}: {len(paths)} frames "
-        f"(boundaries={len(boundaries)}, last={'+1' if add_last else '0'}, "
-        f"fills={insert_count}, dur={dur:.2f}s, max_gap={max_gap}s)"
-    )
+    actual_gap = last_frm_actual - last_kf_actual
+    if added_last:
+        tail = " + 1 last"
+    elif not need_last:
+        tail = f", last frame skipped: gap={actual_gap:.2f}s ≤ {last_frame_min_gap}s"
+    else:
+        tail = f", last frame EXTRACTION FAILED (gap={actual_gap:.2f}s)"
+    print(f"[Phase 2a] clip {clip_id:02d}: {len(paths)} key frame(s) "
+          f"({len(subshot_kfs)} sub-shot first{tail})")
     return paths
 
 
