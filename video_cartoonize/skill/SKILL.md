@@ -18,6 +18,47 @@ description: >
 
 # Video Cartoonize Pipeline (CLI version)
 
+## 安装 CLI
+
+**首次使用前，先确认 `cartoonize` 命令是否可用：**
+
+```bash
+cartoonize --help
+```
+
+如果命令不存在，用一键脚本安装：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Carey8175/video-cartoonize/main/install.sh | bash
+```
+
+安装完成后，脚本会自动：
+1. 将 `cartoonize` 命令安装到 `~/.local/bin/`
+2. 将本 skill 复制到 `~/.claude/skills/video-cartoonize/`
+
+安装后如果 `cartoonize` 找不到，把路径加到 shell：
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+**安装完成后，配置凭证（只需一次）：**
+
+```bash
+cartoonize doctor    # 检查缺少哪些凭证
+```
+
+凭证文件位置：`~/.config/video-cartoonize/`
+
+| 文件 | 内容 | 用途 |
+|------|------|------|
+| `ark_api_key.txt` | ARK API Key（一行） | Seedream / VLM / Seedance 生成 |
+| `ark_ak_sk.json` | `{"ak":"...","sk":"..."}` | Assets API（隐私过滤器绕过） |
+| `tos_credentials.json` | TOS AK/SK + endpoint + bucket | 视频上传到对象存储 |
+
+也可以用环境变量代替文件：`ARK_API_KEY`、`ARK_AK` / `ARK_SK`、`TOS_ACCESS_KEY` 等。
+
+---
+
 ## 架构说明
 
 `cartoonize` CLI **每次只执行一步**，输出 JSON 结果供 agent 读取。  
