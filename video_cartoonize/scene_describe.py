@@ -72,25 +72,49 @@ def _extract_last_frame(clip_path: str, out_dir: str, clip_id: int) -> Optional[
         return None
 
 
+def _get_duration(clip_path: str) -> float:
+    cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+           "-of", "default=nw=1:nk=1", clip_path]
+    try:
+        return float(subprocess.check_output(cmd, text=True).strip())
+    except Exception:
+        return 0.0
+
+
 def extract_keyframes(
     clip_path: str,
     out_dir: str,
     clip_id: int,
     threshold: float = 27.0,
+    last_frame_min_gap: float = 1.0,
 ) -> List[str]:
-    """Phase 2a — sub-shot first frames + last frame for one clip."""
+    """Phase 2a — sub-shot first frames + last frame for one clip.
+
+    last_frame_min_gap: 最后一个子镜头关键帧与片尾的最小间隔（秒）。
+    间隔小于此值时不提取 last frame，避免相邻关键帧过近导致视频跳变。
+    """
     clip_frame_dir = os.path.join(out_dir, f"clip_{clip_id:02d}")
     os.makedirs(clip_frame_dir, exist_ok=True)
 
     subshot_kfs = extract_sub_shot_keyframes(clip_path, clip_frame_dir, threshold=threshold)
     paths = [p for _t, p in subshot_kfs]
 
-    last = _extract_last_frame(clip_path, clip_frame_dir, clip_id)
-    if last:
-        paths.append(last)
+    # 只有最后一个子镜头关键帧距片尾超过 last_frame_min_gap 才追加 last frame
+    dur = _get_duration(clip_path)
+    last_kf_time = subshot_kfs[-1][0] if subshot_kfs else 0.0
+    need_last = dur > 0 and (dur - last_kf_time) > last_frame_min_gap
+
+    added_last = False
+    if need_last:
+        last = _extract_last_frame(clip_path, clip_frame_dir, clip_id)
+        if last:
+            paths.append(last)
+            added_last = True
 
     print(f"[Phase 2a] clip {clip_id:02d}: {len(paths)} key frame(s) "
-          f"({len(subshot_kfs)} sub-shot first + 1 last)")
+          f"({len(subshot_kfs)} sub-shot first"
+          + (f" + 1 last" if added_last else f", last frame skipped: gap={dur - last_kf_time:.1f}s < {last_frame_min_gap}s")
+          + ")")
     return paths
 
 
