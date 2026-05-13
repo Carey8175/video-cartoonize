@@ -583,6 +583,29 @@ def cmd_install_skill(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_version(args: argparse.Namespace) -> int:
+    """显示 CLI 版本、Python 版本、安装位置。"""
+    import platform
+
+    try:
+        from importlib.metadata import version as _pkg_version
+        pkg_ver = _pkg_version("video-cartoonize")
+    except Exception:
+        pkg_ver = "unknown"
+
+    pkg_path = Path(__file__).parent
+    venv_bin = Path(sys.executable).parent
+
+    _out({
+        "cartoonize":  pkg_ver,
+        "python":      platform.python_version(),
+        "platform":    f"{platform.system()} {platform.machine()}",
+        "package_dir": str(pkg_path),
+        "venv":        str(venv_bin.parent),
+    })
+    return 0
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 工具函数
 # ══════════════════════════════════════════════════════════════════════════════
@@ -690,6 +713,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--skills-dir", default="", metavar="DIR",
                    help="Claude skills 目录（默认：~/.claude/skills）")
 
+    # version
+    sub.add_parser("version", help="显示版本信息")
+
     return root
 
 
@@ -711,6 +737,7 @@ def main() -> int:
         "status":    cmd_status,
         "doctor":        cmd_doctor,
         "install-skill": cmd_install_skill,
+        "version":       cmd_version,
     }
 
     if args.cmd == "styles":
