@@ -207,54 +207,75 @@ cartoonize keyframes --work-dir ./my_output
 
 ---
 
-### Step 2b–5a — 按 clip 并行流水线（★ 必须使用，不要全量串行）
+### Step 2b–5a — 按 clip 并行流水线（★ 必须使用 + 严格控制并发）
 
 `cartoon` / `vlm` / `upload` / `submit` 都支持 `--clip-id N`。  
-**Agent 必须使用 per-clip 流水线**，每个 clip 一旦其 `cartoon + vlm` 都完成，就立刻进入它自己的 `upload + submit`，**不要等所有 clip 都做完 cartoon 再统一上传**——那样会浪费大量等待时间。
+**Agent 必须使用 per-clip 流水线 + 限制并发数**，不要一次性把所有 clip 全发出去——会被 Seedream/VLM/Seedance 限速、报错、甚至触发服务端拒绝。
 
-#### Agent 调度规则
+#### ★ 并发控制规则（硬性要求）
 
-对每个 clip_id（同时启动多个 clip，建议并发度 ≥ 6）：
+| 阶段 | 最大并发 clip 数 | 说明 |
+|------|----------------|------|
+| `cartoon` + `vlm` | **6 个 clip 同时进行** | 两个子步骤本身在内部已并行，外层 clip 级别再开 6 个就够了 |
+| `upload` | **同上，跟随 cartoon/vlm 节奏** | 一个 clip 完成 cartoon+vlm 就立刻 upload |
+| `submit` | **同上** | 提交本身很快（秒级），不会成为瓶颈 |
+| `poll` | 用全量 `poll`（一次性查所有） | 不需要并发 |
+
+**正确做法是"信号量式"调度**：任何时刻最多 N=6 个 clip 在流水线中（无论处于 cartoon/vlm/upload/submit 哪一步），有一个完成就放下一个进来。
+
+#### Agent 调度伪代码
 
 ```
-clip_N pipeline（独立任务）:
-  ┌─ cartoon --clip-id N  (后台)   ┐
-  └─ vlm     --clip-id N  (后台)   ┘ ← 这两步并行
-        ↓ 都完成后
-  upload --clip-id N
-        ↓
-  submit --clip-id N
+N = 6                      # 最大并发数
+queue = [0, 1, 2, ..., 51] # 所有 clip_id
+in_flight = {}             # 正在处理的 clip → BackgroundTask
+
+while queue or in_flight:
+    # 1. 在空位上放新的 clip
+    while len(in_flight) < N and queue:
+        cid = queue.pop(0)
+        in_flight[cid] = start_pipeline(cid)   # 后台启动 cartoon+vlm→upload→submit
+
+    # 2. 等任意一个流水线完成
+    done = wait_any(in_flight.values())
+    del in_flight[done.clip_id]
+
+# 所有 submit 完成后，全量 poll
+loop: cartoonize poll --work-dir ... ; if exit 0 break ; sleep 30
 ```
 
-#### 具体命令
+每个 clip 流水线内部：
 
 ```bash
-# clip_00 流水线
-cartoonize cartoon --work-dir ./out --clip-id 0 &  # 后台
-cartoonize vlm     --work-dir ./out --clip-id 0 &  # 后台（与 cartoon 并行）
-wait                                                # 等两者都完成
-cartoonize upload  --work-dir ./out --clip-id 0
-cartoonize submit  --work-dir ./out --clip-id 0
-
-# clip_01 同样独立一条流水线，可与 clip_00 完全并发
-cartoonize cartoon --work-dir ./out --clip-id 1 &
-cartoonize vlm     --work-dir ./out --clip-id 1 &
+cartoonize cartoon --work-dir ./out --clip-id N &   # 后台
+cartoonize vlm     --work-dir ./out --clip-id N &   # 后台（与 cartoon 并行）
 wait
-cartoonize upload  --work-dir ./out --clip-id 1
-cartoonize submit  --work-dir ./out --clip-id 1
+cartoonize upload  --work-dir ./out --clip-id N
+cartoonize submit  --work-dir ./out --clip-id N
 ```
 
-实际操作中，agent 应该**为每个 clip 起一个独立的 background task**，让多个 clip 的 cartoon/vlm 同时跑（受 Seedream/VLM 服务并发限制约束，6-8 个 clip 同时进行通常没问题）。
-
-#### ⚠️ 不要用全量模式（除非 clip 总数 ≤ 3）
+#### ⚠️ 反面案例（不要这样做）
 
 ```bash
-# ❌ 不推荐：必须等所有 clip 都做完 cartoon 才能进 upload
-cartoonize cartoon --work-dir ./out      # 全部 clip 串行处理
+# ❌ 同时启动全部 52 个 clip 的 cartoon ——会被服务端限速 / 拒绝
+for i in $(seq 0 51); do
+  cartoonize cartoon --work-dir ./out --clip-id $i &
+done
+wait
+```
+
+```bash
+# ❌ 全量串行 cartoon → 等所有完了才能 upload，浪费时间
+cartoonize cartoon --work-dir ./out
 cartoonize vlm     --work-dir ./out
 cartoonize upload  --work-dir ./out
 cartoonize submit  --work-dir ./out
 ```
+
+#### 全量模式仅适用：
+
+- clip 总数 ≤ 3（并发收益太小）
+- 调试 / 重跑某个失败阶段
 
 > **state.json 并发安全**：每个子命令只读写自己 clip 的字段，`upload` 和 `submit` 对 state.json 做增量合并，多 clip 并发不会互相覆盖。
 
