@@ -527,6 +527,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if all(checks.values()) else 1
 
 
+def cmd_install_skill(args: argparse.Namespace) -> int:
+    """把 skill/ 目录整体复制到 ~/.claude/skills/video-cartoonize/。"""
+    # skill/ 文件夹与本文件同级（在包内）
+    src_skill_dir = Path(__file__).parent / "skill"
+    if not src_skill_dir.is_dir():
+        _out({"status": "error", "message": f"skill/ directory not found: {src_skill_dir}"})
+        return 1
+
+    override   = getattr(args, "skills_dir", "") or os.environ.get("CLAUDE_SKILLS_DIR", "")
+    skills_dir = Path(override or "~/.claude/skills").expanduser()
+    dest_dir   = skills_dir / "video-cartoonize"
+
+    # 整个 skill/ → dest_dir（覆盖已有文件）
+    shutil.copytree(str(src_skill_dir), str(dest_dir), dirs_exist_ok=True)
+
+    installed = [str(p.relative_to(dest_dir)) for p in dest_dir.rglob("*") if p.is_file()]
+    _out({"status": "ok", "dest": str(dest_dir), "files": installed})
+    print(f"✓ Skill installed → {dest_dir}", file=sys.stderr)
+    return 0
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 工具函数
 # ══════════════════════════════════════════════════════════════════════════════
@@ -621,6 +642,11 @@ def build_parser() -> argparse.ArgumentParser:
     # doctor
     sub.add_parser("doctor", help="检查 ffmpeg 和云服务凭证")
 
+    # install-skill
+    p = sub.add_parser("install-skill", help="将 SKILL.md 安装到 ~/.claude/skills/video-cartoonize/")
+    p.add_argument("--skills-dir", default="", metavar="DIR",
+                   help="Claude skills 目录（默认：~/.claude/skills）")
+
     return root
 
 
@@ -640,7 +666,8 @@ def main() -> int:
         "mux":       cmd_mux,
         "merge":     cmd_merge,
         "status":    cmd_status,
-        "doctor":    cmd_doctor,
+        "doctor":        cmd_doctor,
+        "install-skill": cmd_install_skill,
     }
 
     if args.cmd == "styles":

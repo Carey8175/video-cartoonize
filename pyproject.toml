@@ -23,4 +23,4 @@ where = ["."]
 include = ["video_cartoonize*"]
 
 [tool.setuptools.package-data]
-video_cartoonize = ["style_refs/**/*"]
+video_cartoonize = ["style_refs/**/*", "skill/**/*"]

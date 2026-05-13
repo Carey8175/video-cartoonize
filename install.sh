@@ -76,6 +76,15 @@ EOF
   esac
 }
 
+install_skill() {
+  log "Installing Claude skill → ~/.claude/skills/video-cartoonize/SKILL.md"
+  if "$VENV_DIR/bin/cartoonize" install-skill; then
+    log "Skill installed. Restart Claude Code to pick up the new skill."
+  else
+    log "WARNING: skill install failed (non-fatal). Run manually: cartoonize install-skill"
+  fi
+}
+
 main() {
   require_cmd curl
   require_cmd tar
@@ -92,6 +101,7 @@ PY
   download_source "$INSTALL_TMP_DIR"
   install_package
   install_launcher
+  install_skill
 
   log "Done. Try: cartoonize --help"
 }
