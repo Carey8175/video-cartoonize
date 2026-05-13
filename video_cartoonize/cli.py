@@ -161,7 +161,7 @@ def cmd_keyframes(args: argparse.Namespace) -> int:
 
 
 def cmd_cartoon(args: argparse.Namespace) -> int:
-    """Phase 2b — Seedream I2I 卡通化所有关键帧。"""
+    """Phase 2b — Seedream I2I 卡通化关键帧（--clip-id 指定单个 clip）。"""
     from video_cartoonize import state as st
     from video_cartoonize.scene_describe import cartoonize_subshot_frames
     from video_cartoonize.styles import get_style
@@ -175,8 +175,11 @@ def cmd_cartoon(args: argparse.Namespace) -> int:
     style    = get_style(c["style_id"], user_ref_paths=c.get("ref_images") or None)
     cart_dir = os.path.join(work_dir, "cartoons")
 
+    clip_id  = getattr(args, "clip_id", None)
+    targets  = [cl for cl in clips if clip_id is None or cl.clip_id == clip_id]
+
     summary = []
-    for clip in clips:
+    for clip in targets:
         clip.subshot_cartoon_paths = cartoonize_subshot_frames(
             frame_paths=clip.subshot_frame_paths,
             out_dir=cart_dir,
@@ -198,8 +201,7 @@ def cmd_cartoon(args: argparse.Namespace) -> int:
 
 
 def cmd_vlm(args: argparse.Namespace) -> int:
-    """Phase 3 — VLM 场景分析，生成每个片段的 Seedance prompt。"""
-    from concurrent.futures import ThreadPoolExecutor
+    """Phase 3 — VLM 场景分析，生成 Seedance prompt（--clip-id 指定单个 clip）。"""
     from video_cartoonize import state as st
     from video_cartoonize.styles import get_style
     from video_cartoonize.core import build_preamble
@@ -210,11 +212,15 @@ def cmd_vlm(args: argparse.Namespace) -> int:
     cfg      = st.cfg_from_state(s)
     cfg.api_key = _resolve_key(cfg.api_key)
     clips    = st.clips_from_state(s)
-    c        = s["config"]
-    style    = get_style(c["style_id"])
+    style    = get_style(s["config"]["style_id"])
     preamble = build_preamble(style.description)
 
-    def get_prompt(clip):
+    clip_id  = getattr(args, "clip_id", None)
+    targets  = [cl for cl in clips if clip_id is None or cl.clip_id == clip_id]
+
+    prompts: Dict[int, str] = {int(k): v for k, v in s.get("prompts", {}).items()}
+
+    for clip in targets:
         try:
             script = analyse_clip(clip.resized_path,
                                   api_key=cfg.api_key,
@@ -225,25 +231,21 @@ def cmd_vlm(args: argparse.Namespace) -> int:
                 timeline = "\n".join(lines[idx + 1:]).strip()
             except StopIteration:
                 timeline = script.strip()
-            return clip.clip_id, f"{preamble}\n\n{timeline}"
+            prompts[clip.clip_id] = f"{preamble}\n\n{timeline}"
         except Exception as e:
             print(f"[VLM] clip_{clip.clip_id:02d} ✗ {e}", file=sys.stderr)
-            return clip.clip_id, preamble
-
-    prompts: Dict[int, str] = {}
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        for cid, prompt in pool.map(get_prompt, clips):
-            prompts[cid] = prompt
+            prompts[clip.clip_id] = preamble
 
     s["prompts"] = {str(k): v for k, v in prompts.items()}
     st.save(work_dir, s)
     _out({"status": "ok",
-          "prompts": {str(k): f"{v[:80]}…" for k, v in prompts.items()}})
+          "prompts": {str(c.clip_id): f"{prompts[c.clip_id][:80]}…"
+                      for c in targets if c.clip_id in prompts}})
     return 0
 
 
 def cmd_upload(args: argparse.Namespace) -> int:
-    """Phase 4 — TOS 上传 + Assets API 注册（绕过隐私过滤器）。"""
+    """Phase 4 — TOS 上传 + Assets API 注册（--clip-id 指定单个 clip）。"""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from video_cartoonize import state as st
     from video_cartoonize.assets_setup import get_or_create_group, upload_assets
@@ -253,12 +255,16 @@ def cmd_upload(args: argparse.Namespace) -> int:
     s        = st.require(work_dir)
     clips    = st.clips_from_state(s)
 
+    clip_id  = getattr(args, "clip_id", None)
+    targets  = [cl for cl in clips if clip_id is None or cl.clip_id == clip_id]
+
     date_tag = datetime.now().strftime("%Y%m%d")
-    group_id = get_or_create_group(f"cartoonize-{date_tag}")
+    group_id = s.get("asset_group_id") or get_or_create_group(f"cartoonize-{date_tag}")
+    s["asset_group_id"] = group_id  # 复用同一个 group
 
     # 并行 TOS 上传
     upload_jobs: List[tuple] = []
-    for clip in clips:
+    for clip in targets:
         upload_jobs.append((f"clip_{clip.clip_id:02d}", clip.resized_path))
         for j, p in enumerate(clip.subshot_cartoon_paths):
             upload_jobs.append((f"kf_{clip.clip_id:02d}_{j:02d}", p))
@@ -279,7 +285,7 @@ def cmd_upload(args: argparse.Namespace) -> int:
 
     # Assets 注册
     items = []
-    for clip in clips:
+    for clip in targets:
         k = f"clip_{clip.clip_id:02d}"
         if k in tos_urls:
             items.append((k, "Video", tos_urls[k], k))
@@ -290,9 +296,11 @@ def cmd_upload(args: argparse.Namespace) -> int:
 
     asset_urls = upload_assets(group_id, items, max_workers=7)
 
-    # 写回
-    clip_asset_urls: Dict[int, str] = {}
-    for clip in clips:
+    # 写回（增量合并，不覆盖其他 clip 已有的 asset）
+    clip_asset_urls: Dict[int, str] = {
+        int(k): v for k, v in s.get("clip_asset_urls", {}).items()
+    }
+    for clip in targets:
         vid_key = f"clip_{clip.clip_id:02d}"
         if vid_key in asset_urls:
             clip_asset_urls[clip.clip_id] = asset_urls[vid_key]
@@ -306,12 +314,13 @@ def cmd_upload(args: argparse.Namespace) -> int:
     s["clip_asset_urls"] = {str(k): v for k, v in clip_asset_urls.items()}
     st.save(work_dir, s)
     _out({"status": "ok", "group_id": group_id,
-          "tos_uploaded": len(tos_urls), "assets_active": len(asset_urls)})
+          "tos_uploaded": len(tos_urls), "assets_active": len(asset_urls),
+          "clip_ids": [cl.clip_id for cl in targets]})
     return 0
 
 
 def cmd_submit(args: argparse.Namespace) -> int:
-    """Phase 5a — 批量提交所有 Seedance 任务（不等待结果）。"""
+    """Phase 5a — 提交 Seedance 任务（--clip-id 指定单个 clip）。"""
     from video_cartoonize import state as st
     from video_cartoonize.styles import get_style
     from video_cartoonize.core import build_preamble, detect_ratio, submit_clip
@@ -324,12 +333,18 @@ def cmd_submit(args: argparse.Namespace) -> int:
     prompts  = {int(k): v for k, v in s.get("prompts", {}).items()}
     clip_asset_urls = {int(k): v for k, v in s.get("clip_asset_urls", {}).items()}
 
+    clip_id  = getattr(args, "clip_id", None)
+    targets  = [cl for cl in clips if clip_id is None or cl.clip_id == clip_id]
+
     ratio = s["config"].get("ratio") or detect_ratio(clips[0].resized_path)
     style = get_style(s["config"]["style_id"])
     preamble = build_preamble(style.description)
 
     submitted = []
-    for clip in clips:
+    for clip in targets:
+        if clip.task_id:  # 已提交过，跳过
+            submitted.append({"clip_id": clip.clip_id, "task_id": clip.task_id, "skipped": True})
+            continue
         vid_url = clip_asset_urls.get(clip.clip_id, "")
         if not vid_url:
             print(f"[submit] clip_{clip.clip_id:02d}: no asset URL, skip", file=sys.stderr)
@@ -623,18 +638,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scene-threshold",   type=float, default=25.0)
     p.add_argument("--subshot-threshold", type=float, default=27.0)
 
-    # split / keyframes / cartoon / vlm / upload / submit / mux / merge
+    # split / keyframes / mux / merge — 全量，无 --clip-id
     for name, help_text in [
         ("split",     "Phase 1: 场景切分 + 缩放"),
         ("keyframes", "Phase 2a: 关键帧提取"),
-        ("cartoon",   "Phase 2b: Seedream 卡通化"),
-        ("vlm",       "Phase 3: VLM 场景分析"),
-        ("upload",    "Phase 4: TOS + Assets 上传"),
-        ("submit",    "Phase 5a: 提交 Seedance 任务"),
         ("mux",       "Phase 6: 下载 + 音轨合并"),
         ("merge",     "Phase 7: 拼接最终视频"),
     ]:
         _add_work_dir(sub.add_parser(name, help=help_text))
+
+    # cartoon / vlm / upload / submit — 支持 --clip-id 单 clip 模式
+    for name, help_text in [
+        ("cartoon", "Phase 2b: Seedream 卡通化（--clip-id 指定单个 clip）"),
+        ("vlm",     "Phase 3: VLM 场景分析（--clip-id 指定单个 clip）"),
+        ("upload",  "Phase 4: TOS + Assets 上传（--clip-id 指定单个 clip）"),
+        ("submit",  "Phase 5a: 提交 Seedance 任务（--clip-id 指定单个 clip）"),
+    ]:
+        p = sub.add_parser(name, help=help_text)
+        _add_work_dir(p)
+        p.add_argument("--clip-id", type=int, default=None, metavar="N",
+                       help="只处理指定 clip（不填则处理全部）")
 
     # poll
     p = sub.add_parser("poll", help="Phase 5b: 查询 Seedance 任务状态（exit 0=全完成，1=仍运行中）")
