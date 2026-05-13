@@ -7,7 +7,17 @@ INSTALL_HOME="${VIDEO_CARTOONIZE_HOME:-$HOME/.local/share/video-cartoonize}"
 BIN_DIR="${VIDEO_CARTOONIZE_BIN_DIR:-$HOME/.local/bin}"
 VENV_DIR="$INSTALL_HOME/venv"
 SRC_DIR="$INSTALL_HOME/src"
-PYTHON_BIN="${PYTHON:-python3}"
+# 自动选最新可用的 Python（>= 3.10 优先，回退到 python3）。
+# 可以用 PYTHON=python3.12 强制覆盖。
+choose_python() {
+  for v in 3.13 3.12 3.11 3.10; do
+    if command -v "python$v" >/dev/null 2>&1; then
+      echo "python$v"; return
+    fi
+  done
+  echo "python3"
+}
+PYTHON_BIN="${PYTHON:-$(choose_python)}"
 
 log() {
   printf '[video-cartoonize] %s\n' "$*"

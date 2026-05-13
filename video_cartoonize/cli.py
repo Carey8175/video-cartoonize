@@ -194,8 +194,11 @@ def cmd_cartoon(args: argparse.Namespace) -> int:
                          "cartoons": len(clip.subshot_cartoon_paths),
                          "paths": clip.subshot_cartoon_paths})
 
-    st.clips_to_state(s, clips)
-    st.save(work_dir, s)
+    # 加锁，重读 + 增量合并（并发安全）
+    with st.lock(work_dir):
+        s2 = st.require(work_dir)
+        st.merge_clips(s2, targets)
+        st.save(work_dir, s2)
     _out({"status": "ok", "clips": summary})
     return 0
 
@@ -218,8 +221,7 @@ def cmd_vlm(args: argparse.Namespace) -> int:
     clip_id  = getattr(args, "clip_id", None)
     targets  = [cl for cl in clips if clip_id is None or cl.clip_id == clip_id]
 
-    prompts: Dict[int, str] = {int(k): v for k, v in s.get("prompts", {}).items()}
-
+    new_prompts: Dict[int, str] = {}
     for clip in targets:
         try:
             script = analyse_clip(clip.resized_path,
@@ -231,16 +233,20 @@ def cmd_vlm(args: argparse.Namespace) -> int:
                 timeline = "\n".join(lines[idx + 1:]).strip()
             except StopIteration:
                 timeline = script.strip()
-            prompts[clip.clip_id] = f"{preamble}\n\n{timeline}"
+            new_prompts[clip.clip_id] = f"{preamble}\n\n{timeline}"
         except Exception as e:
             print(f"[VLM] clip_{clip.clip_id:02d} ✗ {e}", file=sys.stderr)
-            prompts[clip.clip_id] = preamble
+            new_prompts[clip.clip_id] = preamble
 
-    s["prompts"] = {str(k): v for k, v in prompts.items()}
-    st.save(work_dir, s)
+    # 加锁，重读 + 合并已有 prompts（并发安全）
+    with st.lock(work_dir):
+        s2 = st.require(work_dir)
+        merged = {int(k): v for k, v in s2.get("prompts", {}).items()}
+        merged.update(new_prompts)
+        s2["prompts"] = {str(k): v for k, v in merged.items()}
+        st.save(work_dir, s2)
     _out({"status": "ok",
-          "prompts": {str(c.clip_id): f"{prompts[c.clip_id][:80]}…"
-                      for c in targets if c.clip_id in prompts}})
+          "prompts": {str(cid): f"{p[:80]}…" for cid, p in new_prompts.items()}})
     return 0
 
 
@@ -296,23 +302,27 @@ def cmd_upload(args: argparse.Namespace) -> int:
 
     asset_urls = upload_assets(group_id, items, max_workers=7)
 
-    # 写回（增量合并，不覆盖其他 clip 已有的 asset）
-    clip_asset_urls: Dict[int, str] = {
-        int(k): v for k, v in s.get("clip_asset_urls", {}).items()
-    }
+    # 计算本次新增的 asset URL（per-clip）
+    new_clip_asset_urls: Dict[int, str] = {}
     for clip in targets:
         vid_key = f"clip_{clip.clip_id:02d}"
         if vid_key in asset_urls:
-            clip_asset_urls[clip.clip_id] = asset_urls[vid_key]
+            new_clip_asset_urls[clip.clip_id] = asset_urls[vid_key]
         clip.subshot_cartoon_urls = [
             asset_urls[f"kf_{clip.clip_id:02d}_{j:02d}"]
             for j in range(len(clip.subshot_cartoon_paths))
             if f"kf_{clip.clip_id:02d}_{j:02d}" in asset_urls
         ]
 
-    st.clips_to_state(s, clips)
-    s["clip_asset_urls"] = {str(k): v for k, v in clip_asset_urls.items()}
-    st.save(work_dir, s)
+    # 加锁，重读 + 增量合并（并发安全）
+    with st.lock(work_dir):
+        s2 = st.require(work_dir)
+        st.merge_clips(s2, targets)
+        existing = {int(k): v for k, v in s2.get("clip_asset_urls", {}).items()}
+        existing.update(new_clip_asset_urls)
+        s2["clip_asset_urls"] = {str(k): v for k, v in existing.items()}
+        s2["asset_group_id"]  = group_id
+        st.save(work_dir, s2)
     _out({"status": "ok", "group_id": group_id,
           "tos_uploaded": len(tos_urls), "assets_active": len(asset_urls),
           "clip_ids": [cl.clip_id for cl in targets]})
@@ -358,8 +368,11 @@ def cmd_submit(args: argparse.Namespace) -> int:
         else:
             clip.status = "failed"
 
-    st.clips_to_state(s, clips)
-    st.save(work_dir, s)
+    # 加锁，重读 + 增量合并（并发安全）
+    with st.lock(work_dir):
+        s2 = st.require(work_dir)
+        st.merge_clips(s2, targets)
+        st.save(work_dir, s2)
     _out({"status": "ok", "ratio": ratio, "submitted": submitted})
     return 0
 

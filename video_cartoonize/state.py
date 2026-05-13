@@ -1,11 +1,14 @@
 """State file (state.json) read/write helpers."""
+import fcntl
 import json
 import os
+from contextlib import contextmanager
 from typing import List, Optional
 
 from video_cartoonize.models import ClipInfo
 
 STATE_FILE = "state.json"
+LOCK_FILE  = ".state.lock"
 
 
 def path(work_dir: str) -> str:
@@ -77,7 +80,42 @@ def clips_from_state(state: dict) -> List[ClipInfo]:
 
 
 def clips_to_state(state: dict, clips: List[ClipInfo]) -> None:
+    """整体替换 clips 数组（用于 split 阶段第一次写入）。"""
     state["clips"] = [clip_to_dict(c) for c in clips]
+
+
+def merge_clips(state: dict, updated: List[ClipInfo]) -> None:
+    """按 clip_id 增量合并；只更新传入的 clip，其他 clip 字段保持不变。
+
+    用于并发安全的 per-clip 写入场景（cartoon / vlm / upload / submit）。
+    """
+    by_id = {c["clip_id"]: c for c in state.get("clips", [])}
+    for c in updated:
+        by_id[c.clip_id] = clip_to_dict(c)
+    state["clips"] = [by_id[k] for k in sorted(by_id.keys())]
+
+
+# ── 跨进程互斥锁 ─────────────────────────────────────────────────────────────
+
+@contextmanager
+def lock(work_dir: str):
+    """对 state.json 加排他锁，配合 read-modify-write 防止并发覆盖。
+
+    用法:
+        with state.lock(work_dir):
+            s = state.require(work_dir)   # 重新读取最新状态
+            ... 增量修改 s ...
+            state.save(work_dir, s)
+    """
+    os.makedirs(work_dir, exist_ok=True)
+    lock_path = os.path.join(work_dir, LOCK_FILE)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def cfg_from_state(state: dict):
