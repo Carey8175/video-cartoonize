@@ -49,13 +49,16 @@ cartoonize doctor    # 检查缺少哪些凭证
 
 凭证文件位置：`~/.config/video-cartoonize/`
 
-| 文件 | 内容 | 用途 |
-|------|------|------|
-| `ark_api_key.txt` | ARK API Key（一行） | Seedream / VLM / Seedance 生成 |
-| `ark_ak_sk.json` | `{"ak":"...","sk":"..."}` | Assets API（隐私过滤器绕过） |
-| `tos_credentials.json` | TOS AK/SK + endpoint + bucket | 视频上传到对象存储 |
+| 文件 | 必填内容 | 用途 |
+|------|---------|------|
+| `ark_api_key.txt` | ARK API Key（一行）| Seedream / VLM / Seedance 生成 |
+| `ark_ak_sk.json` | `{"ak":"...","sk":"..."}` | Assets API + TOS 上传（共用同一组密钥）|
+| `tos_credentials.json` | `{"bucket":"your-bucket"}` | TOS bucket 名（AK/SK 自动复用上面那组）|
 
-也可以用环境变量代替文件：`ARK_API_KEY`、`ARK_AK` / `ARK_SK`、`TOS_ACCESS_KEY` 等。
+> **说明**：ARK AK/SK 和 TOS AK/SK 是同一组密钥，无需重复填写。  
+> TOS endpoint 默认 `tos-ap-southeast-1.volces.com`，无需填写；如需覆盖可在 `tos_credentials.json` 中加 `"endpoint"` 字段。
+
+也可以用环境变量：`ARK_API_KEY`、`ARK_AK` / `ARK_SK`、`TOS_BUCKET`。
 
 ---
 
@@ -157,7 +160,7 @@ cartoonize init \
 ```bash
 cartoonize doctor --work-dir ./my_output
 ```
-检查项：ffmpeg、ARK API Key、ARK AK/SK、TOS 凭证。  
+检查项：ffmpeg、ARK API Key、ARK AK/SK（同时用于 Assets API 和 TOS）、TOS bucket。  
 凭证文件位置：`~/.config/video-cartoonize/`
 
 ---

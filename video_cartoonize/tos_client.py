@@ -11,35 +11,63 @@ from typing import Any
 
 import tos
 
-from video_cartoonize.settings import TOS_CREDS_FILE
+from video_cartoonize.settings import ARK_AK_SK_FILE, TOS_CREDS_FILE
+
+# TOS 默认值（BytePlus 国际站，ap-southeast-1）
+_DEFAULT_ENDPOINT = "tos-ap-southeast-1.volces.com"
+_DEFAULT_REGION   = "ap-southeast-1"
 
 
 def load_credentials() -> dict[str, Any]:
+    """加载 TOS 凭证。
+
+    优先级（由高到低）：
+      1. 环境变量 TOS_ACCESS_KEY / TOS_SECRET_KEY / TOS_ENDPOINT / TOS_REGION / TOS_BUCKET
+      2. tos_credentials.json（只需填 bucket，其余可省略）
+      3. AK/SK 复用 ark_ak_sk.json（与 Assets API 共用同一组密钥）
+      4. endpoint / region 使用内置默认值
+    """
+    # 读 tos_credentials.json（可只含 bucket）
     creds: dict[str, Any] = {}
     if TOS_CREDS_FILE.exists():
         creds.update(json.loads(TOS_CREDS_FILE.read_text(encoding="utf-8")))
 
+    # 环境变量覆盖
     env_map = {
         "access_key": "TOS_ACCESS_KEY",
         "secret_key": "TOS_SECRET_KEY",
-        "endpoint": "TOS_ENDPOINT",
-        "region": "TOS_REGION",
-        "bucket": "TOS_BUCKET",
+        "endpoint":   "TOS_ENDPOINT",
+        "region":     "TOS_REGION",
+        "bucket":     "TOS_BUCKET",
     }
     for field, env_name in env_map.items():
         if os.environ.get(env_name):
             creds[field] = os.environ[env_name]
 
-    missing = [
-        k for k in ("access_key", "secret_key", "endpoint", "region", "bucket")
-        if not creds.get(k)
-    ]
+    # AK/SK 回退到 ark_ak_sk.json（与 Assets API 共用）
+    if not creds.get("access_key") or not creds.get("secret_key"):
+        if ARK_AK_SK_FILE.exists():
+            try:
+                ark = json.loads(ARK_AK_SK_FILE.read_text(encoding="utf-8"))
+                creds.setdefault("access_key", ark.get("ak") or ark.get("access_key", ""))
+                creds.setdefault("secret_key", ark.get("sk") or ark.get("secret_key", ""))
+            except Exception:
+                pass
+        # 也支持 ARK_AK / ARK_SK 环境变量
+        creds.setdefault("access_key", os.environ.get("ARK_AK", ""))
+        creds.setdefault("secret_key", os.environ.get("ARK_SK", ""))
+
+    # endpoint / region 使用默认值
+    creds.setdefault("endpoint", _DEFAULT_ENDPOINT)
+    creds.setdefault("region",   _DEFAULT_REGION)
+
+    # 只有 bucket 是真正必填的
+    missing = [k for k in ("access_key", "secret_key", "bucket") if not creds.get(k)]
     if missing:
         raise RuntimeError(
-            "Missing TOS credentials: "
-            + ", ".join(missing)
-            + "\nSet TOS_ACCESS_KEY/TOS_SECRET_KEY/TOS_ENDPOINT/TOS_REGION/TOS_BUCKET "
-            f"or write {TOS_CREDS_FILE}."
+            "缺少 TOS 凭证: " + ", ".join(missing) + "\n"
+            f"请在 {TOS_CREDS_FILE} 中填写 bucket（AK/SK 与 ark_ak_sk.json 共用）。\n"
+            "或设置环境变量 TOS_ACCESS_KEY / TOS_SECRET_KEY / TOS_BUCKET。"
         )
     return creds
 
