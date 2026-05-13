@@ -24,6 +24,7 @@ import os
 import shutil
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List
 
 from video_cartoonize.settings import ARK_KEY_FILE
