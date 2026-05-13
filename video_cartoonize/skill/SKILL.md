@@ -207,42 +207,56 @@ cartoonize keyframes --work-dir ./my_output
 
 ---
 
-### Step 2b + Step 3 — Seedream 卡通化 & VLM 场景分析
+### Step 2b–5a — 按 clip 并行流水线（★ 必须使用，不要全量串行）
 
-`cartoon`、`vlm`、`upload`、`submit` 都支持 `--clip-id N`，可以**按 clip 级别流水线**执行，无需等所有 clip 完成再进入下一步。
+`cartoon` / `vlm` / `upload` / `submit` 都支持 `--clip-id N`。  
+**Agent 必须使用 per-clip 流水线**，每个 clip 一旦其 `cartoon + vlm` 都完成，就立刻进入它自己的 `upload + submit`，**不要等所有 clip 都做完 cartoon 再统一上传**——那样会浪费大量等待时间。
 
-**推荐：per-clip 流水线（最快）**
+#### Agent 调度规则
 
-```bash
-# split + keyframes 全量完成后，每个 clip 独立流水线
-# agent 可并发启动多个 clip，每个 clip 内部 cartoon 和 vlm 并行
+对每个 clip_id（同时启动多个 clip，建议并发度 ≥ 6）：
 
-# clip_00
-cartoonize cartoon --work-dir ./my_output --clip-id 0  # 后台
-cartoonize vlm     --work-dir ./my_output --clip-id 0  # 后台（与 cartoon 并行）
-# 两者完成后：
-cartoonize upload  --work-dir ./my_output --clip-id 0
-cartoonize submit  --work-dir ./my_output --clip-id 0
-
-# clip_01（可与 clip_00 同时进行）
-cartoonize cartoon --work-dir ./my_output --clip-id 1
-cartoonize vlm     --work-dir ./my_output --clip-id 1
-cartoonize upload  --work-dir ./my_output --clip-id 1
-cartoonize submit  --work-dir ./my_output --clip-id 1
-
-# ... 其余 clip 同理
+```
+clip_N pipeline（独立任务）:
+  ┌─ cartoon --clip-id N  (后台)   ┐
+  └─ vlm     --clip-id N  (后台)   ┘ ← 这两步并行
+        ↓ 都完成后
+  upload --clip-id N
+        ↓
+  submit --clip-id N
 ```
 
-**也可以全量模式（不加 --clip-id）：**
+#### 具体命令
 
 ```bash
-cartoonize cartoon --work-dir ./my_output   # 处理所有 clip
-cartoonize vlm     --work-dir ./my_output
-cartoonize upload  --work-dir ./my_output
-cartoonize submit  --work-dir ./my_output
+# clip_00 流水线
+cartoonize cartoon --work-dir ./out --clip-id 0 &  # 后台
+cartoonize vlm     --work-dir ./out --clip-id 0 &  # 后台（与 cartoon 并行）
+wait                                                # 等两者都完成
+cartoonize upload  --work-dir ./out --clip-id 0
+cartoonize submit  --work-dir ./out --clip-id 0
+
+# clip_01 同样独立一条流水线，可与 clip_00 完全并发
+cartoonize cartoon --work-dir ./out --clip-id 1 &
+cartoonize vlm     --work-dir ./out --clip-id 1 &
+wait
+cartoonize upload  --work-dir ./out --clip-id 1
+cartoonize submit  --work-dir ./out --clip-id 1
 ```
 
-> **state.json 并发安全说明**：`upload` 和 `submit` 对 state.json 做增量写入，多个 clip 并发执行不会互相覆盖。`cartoon` 和 `vlm` 也只写自己 clip 的字段。
+实际操作中，agent 应该**为每个 clip 起一个独立的 background task**，让多个 clip 的 cartoon/vlm 同时跑（受 Seedream/VLM 服务并发限制约束，6-8 个 clip 同时进行通常没问题）。
+
+#### ⚠️ 不要用全量模式（除非 clip 总数 ≤ 3）
+
+```bash
+# ❌ 不推荐：必须等所有 clip 都做完 cartoon 才能进 upload
+cartoonize cartoon --work-dir ./out      # 全部 clip 串行处理
+cartoonize vlm     --work-dir ./out
+cartoonize upload  --work-dir ./out
+cartoonize submit  --work-dir ./out
+```
+
+> **state.json 并发安全**：每个子命令只读写自己 clip 的字段，`upload` 和 `submit` 对 state.json 做增量合并，多 clip 并发不会互相覆盖。
 
 **cartoon 输出：**
 ```json

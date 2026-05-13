@@ -56,17 +56,26 @@ def _seedream_i2i(
 def _extract_last_frame(clip_path: str, out_dir: str, clip_id: int) -> Optional[str]:
     """提取 clip 真正的最后一帧。
 
-    用 -sseof -0 从文件末尾反向 seek，保证拿到的是实际最后一帧，
-    而不是快速 seek（-ss before -i）跳到的最近关键帧。
+    用 accurate seek（-ss 放在 -i 之后），精确定位到 dur-0.05s 附近的真实帧，
+    避免快速 seek（-ss before -i）跳到最近关键帧，也避免 -sseof 极小偏移
+    引发的 mjpeg 编码失败。
     """
-    dst = os.path.join(out_dir, f"clip_{clip_id:02d}_last_frame.jpg")
+    cmd_dur = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+               "-of", "default=nw=1:nk=1", clip_path]
+    try:
+        dur = float(subprocess.check_output(cmd_dur, text=True).strip())
+    except Exception:
+        return None
+
+    seek = max(0.0, dur - 0.05)  # 距片尾 1 帧左右（@20fps），保证有内容
+    dst  = os.path.join(out_dir, f"clip_{clip_id:02d}_last_frame.jpg")
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-sseof", "-0.001",        # 从文件末尾反向 seek 0.001s
-           "-i", clip_path,
+           "-i", clip_path,           # input 在前 → accurate seek
+           "-ss", f"{seek:.3f}",
            "-frames:v", "1", "-update", "1", dst]
     try:
         subprocess.run(cmd, check=True)
-        return dst
+        return dst if os.path.exists(dst) and os.path.getsize(dst) > 0 else None
     except subprocess.CalledProcessError:
         return None
 
@@ -114,11 +123,14 @@ def extract_keyframes(
             added_last = True
 
     actual_gap = last_frm_actual - last_kf_actual
+    if added_last:
+        tail = " + 1 last"
+    elif not need_last:
+        tail = f", last frame skipped: gap={actual_gap:.2f}s ≤ {last_frame_min_gap}s"
+    else:
+        tail = f", last frame EXTRACTION FAILED (gap={actual_gap:.2f}s)"
     print(f"[Phase 2a] clip {clip_id:02d}: {len(paths)} key frame(s) "
-          f"({len(subshot_kfs)} sub-shot first"
-          + (f" + 1 last" if added_last
-             else f", last frame skipped: actual gap={actual_gap:.2f}s ≤ {last_frame_min_gap}s")
-          + ")")
+          f"({len(subshot_kfs)} sub-shot first{tail})")
     return paths
 
 
