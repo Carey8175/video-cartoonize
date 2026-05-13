@@ -6,28 +6,27 @@ The CLI does not run the whole workflow by itself. Each command executes exactly
 
 ## Install
 
-From a GitHub repo, users can install globally with one command:
+Public repo install:
 
 ```bash
-pipx install "git+https://github.com/<owner>/<repo>.git"
+bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/Carey8175/video-cartoonize/main/install.sh)'
 ```
 
-For private repos over SSH:
+If the repo is private or GitHub rate limits raw downloads, pass `GITHUB_TOKEN`:
 
 ```bash
-pipx install "git+ssh://git@github.com/<owner>/<repo>.git"
+bash -c 'bash <(curl -fsSL -H "Authorization: token $GITHUB_TOKEN" https://raw.githubusercontent.com/Carey8175/video-cartoonize/main/install.sh)'
 ```
 
-If the package lives in a subdirectory of a repo:
+The installer creates an isolated venv under `~/.local/share/video-cartoonize/` and writes the global command to `~/.local/bin/cartoonize`. It does not require `pipx`.
+
+Optional install overrides:
 
 ```bash
-pipx install "git+https://github.com/<owner>/<repo>.git#subdirectory=video_cartoonize"
-```
-
-Local development:
-
-```bash
-pipx install -e . --force
+VIDEO_CARTOONIZE_HOME="$HOME/.video-cartoonize" \
+VIDEO_CARTOONIZE_BIN_DIR="$HOME/bin" \
+VIDEO_CARTOONIZE_REF="main" \
+bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/Carey8175/video-cartoonize/main/install.sh)'
 ```
 
 After install, the command is global:
@@ -96,6 +95,9 @@ cartoonize status --work-dir ./out
 ## Update / Remove
 
 ```bash
-pipx reinstall video-cartoonize
-pipx uninstall video-cartoonize
+# update: rerun the install command
+bash -c 'bash <(curl -fsSL https://raw.githubusercontent.com/Carey8175/video-cartoonize/main/install.sh)'
+
+# remove
+rm -rf ~/.local/share/video-cartoonize ~/.local/bin/cartoonize
 ```
