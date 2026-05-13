@@ -7,7 +7,7 @@ import tempfile
 import urllib.request
 from typing import List, Optional
 
-from scenedetect import VideoManager, SceneManager
+from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector
 from scenedetect.frame_timecode import FrameTimecode
 
@@ -124,21 +124,17 @@ def _adjust_scenes(scene_list, min_sec, max_sec, framerate):
 
 def split_video(video_path: str, out_dir: str, cfg: PipelineConfig) -> List[str]:
     os.makedirs(out_dir, exist_ok=True)
-    vm = VideoManager([video_path])
+    video = open_video(video_path)             # PySceneDetect 0.7+ API
     sm = SceneManager()
     sm.add_detector(ContentDetector(threshold=cfg.scene_threshold))
-    try:
-        vm.start()
-        fps = vm.get_framerate()
-        sm.detect_scenes(frame_source=vm)
-        scenes = sm.get_scene_list()
-        print(f"[Split] detected {len(scenes)} raw scenes")
-        clips = _adjust_scenes(scenes, cfg.min_clip_duration, cfg.max_clip_duration, fps)
-        print(f"[Split] → {len(clips)} clips after duration adjustment")
-        name = os.path.basename(video_path).rsplit(".", 1)[0]
-        _split_clips_ffmpeg(video_path, clips, out_dir, name)
-    finally:
-        vm.release()
+    sm.detect_scenes(video=video)
+    fps = video.frame_rate
+    scenes = sm.get_scene_list()
+    print(f"[Split] detected {len(scenes)} raw scenes")
+    clips = _adjust_scenes(scenes, cfg.min_clip_duration, cfg.max_clip_duration, fps)
+    print(f"[Split] → {len(clips)} clips after duration adjustment")
+    name = os.path.basename(video_path).rsplit(".", 1)[0]
+    _split_clips_ffmpeg(video_path, clips, out_dir, name)
     result = sorted(os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.endswith(".mp4"))
     print(f"[Split] saved {len(result)} clips → {out_dir}")
     return result
