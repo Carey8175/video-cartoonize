@@ -13,6 +13,8 @@ dependencies = [
     "opencv-python",
     "tos",
     "Pillow",
+    "truststore;python_version>='3.10'",  # 用系统 keychain 解决公司 MITM 证书
+    "certifi",                              # fallback CA bundle
 ]
 
 [project.scripts]
