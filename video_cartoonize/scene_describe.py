@@ -100,9 +100,12 @@ def extract_keyframes(
     paths = [p for _t, p in subshot_kfs]
 
     # 只有最后一个子镜头关键帧距片尾超过 last_frame_min_gap 才追加 last frame
+    # 比较实际提取的帧时间戳（两端都有 0.1s nudge），而非原始边界时间
     dur = _get_duration(clip_path)
     last_kf_time = subshot_kfs[-1][0] if subshot_kfs else 0.0
-    need_last = dur > 0 and (dur - last_kf_time) > last_frame_min_gap
+    last_kf_actual  = max(0.05, last_kf_time + 0.1)  # 子镜头帧实际提取时刻
+    last_frm_actual = max(0.0, dur - 0.1)             # last frame 实际提取时刻
+    need_last = dur > 0 and (last_frm_actual - last_kf_actual) > last_frame_min_gap
 
     added_last = False
     if need_last:
@@ -111,9 +114,11 @@ def extract_keyframes(
             paths.append(last)
             added_last = True
 
+    actual_gap = last_frm_actual - last_kf_actual
     print(f"[Phase 2a] clip {clip_id:02d}: {len(paths)} key frame(s) "
           f"({len(subshot_kfs)} sub-shot first"
-          + (f" + 1 last" if added_last else f", last frame skipped: gap={dur - last_kf_time:.1f}s < {last_frame_min_gap}s")
+          + (f" + 1 last" if added_last
+             else f", last frame skipped: actual gap={actual_gap:.2f}s ≤ {last_frame_min_gap}s")
           + ")")
     return paths
 
