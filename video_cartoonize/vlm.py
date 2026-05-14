@@ -114,68 +114,62 @@ def analyse_clip(
 # ── 风格校验 ─────────────────────────────────────────────────────────────────
 
 _VERIFY_SYSTEM = (
-    "You are a strict visual style classifier."
+    "You are a strict visual style classifier. "
+    "You always reply with a single valid JSON object and nothing else."
 )
 
 _VERIFY_USER = (
-    "Look at the video. Decide if it is rendered in an animated / cartoon / "
-    "anime / manga / manhwa / manhua / Pixar-3D / hand-drawn illustration style "
-    "(NOT real-life live-action footage or photorealistic CGI).\n\n"
-    "Output format — STRICT:\n"
-    "- The very first word of your response must be exactly YES or NO (uppercase, "
-    "no quotes, no prefix like 'LINE 1:', no markdown).\n"
-    "- After YES/NO, a newline, then one short sentence reason.\n"
-    "- Nothing else.\n\n"
-    "Rule: YES only if the ENTIRE video is unambiguously animated/cartoon. "
-    "Any real-person face, photoreal skin/hair, or real-world textures = NO."
+    "Look at the video and decide if its visual style is fully animated "
+    "(anime / cartoon / manga / manhwa / manhua / Pixar-3D / hand-drawn "
+    "illustration). Real-life live-action footage, photorealistic CGI, or "
+    "any real-person face/skin/hair must be classified as NOT animated.\n\n"
+    "Reply with a single JSON object on one line, exactly this schema:\n"
+    '{"is_anime": true|false, "reason": "one short sentence"}\n\n'
+    "Strict rules:\n"
+    "- Output ONLY the JSON object. No markdown fences, no preamble, no "
+    "trailing text, no 'LINE 1:' prefix.\n"
+    "- is_anime must be a JSON boolean (true / false), not a string.\n"
+    "- reason is a short English sentence (≤ 25 words)."
 )
 
 
 def _parse_verify(raw: str) -> tuple[bool, str]:
-    """从 VLM 响应里抽出 YES/NO + 理由，鲁棒处理各种格式。"""
+    """解析 VLM 返回的 JSON {is_anime, reason}，带兜底。"""
     import re
 
-    # 去掉 markdown 包裹 / 引号 / "LINE X:" 前缀
-    cleaned = []
-    for ln in raw.splitlines():
-        ln = ln.strip().strip("*").strip("`").strip('"').strip("'")
-        ln = re.sub(r"^(line\s*\d+\s*[:.\-]|\d+\.\s*|verdict\s*[:.\-])\s*",
-                    "", ln, flags=re.IGNORECASE).strip()
-        if ln:
-            cleaned.append(ln)
+    text = raw.strip()
 
-    flat = " ".join(cleaned).upper()
-    # 在第一行或整体里搜 YES / NO 单词
-    has_yes = bool(re.search(r"\bYES\b", flat))
-    has_no  = bool(re.search(r"\bNO\b",  flat))
+    # 1) 直接 json.loads
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict) and "is_anime" in obj:
+            return bool(obj["is_anime"]), str(obj.get("reason", ""))[:300]
+    except Exception:
+        pass
 
-    # YES 和 NO 都出现时，取首个出现的（通常 verdict 在前）
-    if has_yes and has_no:
-        idx_yes = flat.find("YES")
-        idx_no  = flat.find("NO")
-        passed = idx_yes < idx_no
-    elif has_yes:
-        passed = True
-    elif has_no:
-        passed = False
-    else:
-        # 兜底语义关键词
-        animated_kw = ("ANIME", "CARTOON", "ANIMATED", "ILLUSTRAT", "MANHWA",
-                       "MANGA", "MANHUA", "PIXAR")
-        real_kw     = ("REAL-LIFE", "LIVE-ACTION", "PHOTOREAL", "REAL PERSON",
-                       "REAL FACE")
-        passed = (any(k in flat for k in animated_kw)
-                  and not any(k in flat for k in real_kw))
+    # 2) 抽出第一个 {...} 再 loads（应对模型加了 ```json 围栏或前后多余字符）
+    m = re.search(r"\{.*?\}", text, re.DOTALL)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict) and "is_anime" in obj:
+                return bool(obj["is_anime"]), str(obj.get("reason", ""))[:300]
+        except Exception:
+            pass
 
-    # 找一行最像"理由"的（既不是单独 YES/NO，也不是空）
-    reason = ""
-    for ln in cleaned:
-        if ln.upper() not in ("YES", "NO") and len(ln) > 3:
-            reason = ln
-            break
-    if not reason and cleaned:
-        reason = cleaned[-1]
-    return passed, reason[:300]
+    # 3) 兜底：在文本里找 true/false 或 anime/real-life 关键词
+    flat = text.lower()
+    if "\"is_anime\"" in flat and "true" in flat.split("is_anime", 1)[1][:30]:
+        return True, text[:300]
+    if "\"is_anime\"" in flat and "false" in flat.split("is_anime", 1)[1][:30]:
+        return False, text[:300]
+
+    animated_kw = ("anime", "cartoon", "animated", "illustrat", "manhwa",
+                   "manga", "manhua", "pixar")
+    real_kw     = ("real-life", "live-action", "photoreal", "real person", "real face")
+    passed = (any(k in flat for k in animated_kw)
+              and not any(k in flat for k in real_kw))
+    return passed, text[:300]
 
 
 def verify_anime_style(
