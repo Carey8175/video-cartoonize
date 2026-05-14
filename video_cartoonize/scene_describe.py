@@ -75,6 +75,8 @@ def _extract_last_frame(clip_path: str, out_dir: str, clip_id: int) -> Optional[
     避免快速 seek（-ss before -i）跳到最近关键帧，也避免 -sseof 极小偏移
     引发的 mjpeg 编码失败。
     """
+    from video_cartoonize.sub_shot_detect import _frame_quality_ok
+
     cmd_dur = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                "-of", "default=nw=1:nk=1", clip_path]
     try:
@@ -82,17 +84,25 @@ def _extract_last_frame(clip_path: str, out_dir: str, clip_id: int) -> Optional[
     except Exception:
         return None
 
-    seek = max(0.0, dur - 0.05)  # 距片尾 1 帧左右（@20fps），保证有内容
     dst  = os.path.join(out_dir, f"clip_{clip_id:02d}_last_frame.jpg")
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-           "-i", clip_path,           # input 在前 → accurate seek
-           "-ss", f"{seek:.3f}",
-           "-frames:v", "1", "-update", "1", dst]
-    try:
-        subprocess.run(cmd, check=True, timeout=60)
-        return dst if os.path.exists(dst) and os.path.getsize(dst) > 0 else None
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        return None
+    # 从末尾往前退 0.05s, 0.2s, 0.5s, 1.0s 找清晰帧
+    last_extracted = None
+    for back in (0.05, 0.2, 0.5, 1.0):
+        seek = max(0.0, dur - back)
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+               "-i", clip_path, "-ss", f"{seek:.3f}",
+               "-frames:v", "1", "-update", "1", dst]
+        try:
+            subprocess.run(cmd, check=True, timeout=60)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            continue
+        if not (os.path.exists(dst) and os.path.getsize(dst) > 0):
+            continue
+        last_extracted = dst
+        if _frame_quality_ok(dst):
+            return dst
+    # 全部不达标但至少有一帧 → 保底返回
+    return last_extracted
 
 
 def _get_duration(clip_path: str) -> float:
