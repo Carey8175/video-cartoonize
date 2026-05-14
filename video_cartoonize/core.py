@@ -49,13 +49,16 @@ SUPPORTED_RATIOS = {
 
 def build_preamble(style_description: str) -> str:
     return (
-        "This is an ANIME generation task. Every element and character in the "
-        "output video MUST be in the specified animated/cartoon style — no "
-        "real-life scenes, no photoreal humans, no live-action footage is allowed. "
-        "Follow the action, motion, and plot from the reference video exactly, "
-        "but render everything in the target animated style. "
-        "Use the reference key frame images to determine the visual style and "
-        "character appearance for the generated video. "
+        "This is a VIDEO REGENERATION task in ANIME style. "
+        "Every element and character in the output video MUST be in the "
+        "specified animated/cartoon style — no real-life scenes, no photoreal "
+        "humans, no live-action footage is allowed in the output. "
+        "DO NOT let any pixel, texture, lighting, or visual content from the "
+        "reference video leak into the generated video. The reference video is "
+        "used ONLY for action/motion/timing reference — treat it as a silent "
+        "motion-capture source, not as visual content. "
+        "Use the reference key frame images (cartoon style) to determine the "
+        "visual style and character appearance for the generated video. "
         f"Target style: {style_description}"
     )
 
