@@ -166,10 +166,69 @@ def _ffprobe_sig(path: str) -> dict:
     return sig
 
 
-def merge_clips(clip_paths: List[str], output_path: str) -> None:
+def merge_clips(
+    clip_paths: List[str],
+    output_path: str,
+    audio_crossfade: float = 0.1,
+) -> None:
+    """拼接所有片段，音轨在相邻片段间做 crossfade 平滑过渡。
+
+    audio_crossfade: 相邻 clip 之间音频交叉淡化的时长（秒），设 0 关闭。
+    视频按 hard cut 拼接（无视觉过渡），音频用 acrossfade 平滑。
+    总体音频会因 crossfade 略短于视频 (N-1)*fade 秒，mp4 容器允许末尾
+    短时无声，绝大多数播放器无感。
+    """
     if not clip_paths:
         print("[Merge] nothing to merge")
         return
+
+    # 单 clip 直接 copy
+    if len(clip_paths) == 1:
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-i", clip_paths[0], "-c", "copy", "-movflags", "+faststart", output_path],
+            check=True,
+        )
+        print(f"[Merge] → {output_path}")
+        return
+
+    # crossfade=0：走老的 concat 路径（快、无损）
+    if audio_crossfade <= 0:
+        return _merge_clips_concat(clip_paths, output_path)
+
+    # 主路径：filter_complex + 音频 acrossfade 链
+    n = len(clip_paths)
+    inputs: List[str] = []
+    for p in clip_paths:
+        inputs += ["-i", p]
+
+    # 视频拼接（hard cut）
+    v_in = "".join(f"[{i}:v]" for i in range(n))
+    v_part = f"{v_in}concat=n={n}:v=1:a=0[v]"
+
+    # 音频 acrossfade 链：[0:a][1:a]acrossfade=...[a01]; [a01][2:a]acrossfade=...[a02] ...
+    a_parts = []
+    prev = "[0:a]"
+    for i in range(1, n):
+        out = "[a]" if i == n - 1 else f"[a{i:03d}]"
+        a_parts.append(f"{prev}[{i}:a]acrossfade=d={audio_crossfade}:c1=tri:c2=tri{out}")
+        prev = out
+
+    fc = ";".join([v_part] + a_parts)
+
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"] + inputs + [
+        "-filter_complex", fc,
+        "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium", "-crf", "18",
+        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+        output_path,
+    ]
+    subprocess.run(cmd, check=True)
+    print(f"[Merge] → {output_path}  (audio crossfade {audio_crossfade}s)")
+
+
+def _merge_clips_concat(clip_paths: List[str], output_path: str) -> None:
+    """老的快速 concat（无音频平滑，保留作为 audio_crossfade=0 的回退）。"""
     sigs = [_ffprobe_sig(p) for p in clip_paths]
     compatible = all(s == sigs[0] for s in sigs[1:])
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:

@@ -95,11 +95,13 @@ def extract_keyframes(
     clip_id: int,
     threshold: float = 27.0,
     last_frame_min_gap: float = 1.0,
+    include_last_frame: bool = False,   # 默认不取末帧（内部参数，CLI 不暴露）
 ) -> List[str]:
-    """Phase 2a — sub-shot first frames + last frame for one clip.
+    """Phase 2a — sub-shot first frames (+ optional last frame)。
 
-    last_frame_min_gap: 最后一个子镜头关键帧与片尾的最小间隔（秒）。
-    间隔小于此值时不提取 last frame，避免相邻关键帧过近导致视频跳变。
+    默认只取子镜头切换后的首帧（用户定义的"关键帧"）。
+    include_last_frame=True 时才追加末帧，且要求与最后一个子镜头帧间隔
+    > last_frame_min_gap，避免帧过近引起视频跳变。
     """
     clip_frame_dir = os.path.join(out_dir, f"clip_{clip_id:02d}")
     os.makedirs(clip_frame_dir, exist_ok=True)
@@ -107,28 +109,18 @@ def extract_keyframes(
     subshot_kfs = extract_sub_shot_keyframes(clip_path, clip_frame_dir, threshold=threshold)
     paths = [p for _t, p in subshot_kfs]
 
-    # 只有最后一个子镜头关键帧距片尾超过 last_frame_min_gap 才追加 last frame
-    # 比较实际提取的帧时间戳（两端都有 0.1s nudge），而非原始边界时间
-    dur = _get_duration(clip_path)
-    last_kf_time = subshot_kfs[-1][0] if subshot_kfs else 0.0
-    last_kf_actual  = max(0.05, last_kf_time + 0.1)  # 子镜头帧实际提取时刻（含 nudge）
-    last_frm_actual = dur                             # -sseof 保证拿到真正最后一帧
-    need_last = dur > 0 and (last_frm_actual - last_kf_actual) > last_frame_min_gap
-
     added_last = False
-    if need_last:
-        last = _extract_last_frame(clip_path, clip_frame_dir, clip_id)
-        if last:
-            paths.append(last)
-            added_last = True
+    if include_last_frame:
+        dur = _get_duration(clip_path)
+        last_kf_time = subshot_kfs[-1][0] if subshot_kfs else 0.0
+        last_kf_actual = max(0.05, last_kf_time + 0.1)
+        if dur > 0 and (dur - last_kf_actual) > last_frame_min_gap:
+            last = _extract_last_frame(clip_path, clip_frame_dir, clip_id)
+            if last:
+                paths.append(last)
+                added_last = True
 
-    actual_gap = last_frm_actual - last_kf_actual
-    if added_last:
-        tail = " + 1 last"
-    elif not need_last:
-        tail = f", last frame skipped: gap={actual_gap:.2f}s ≤ {last_frame_min_gap}s"
-    else:
-        tail = f", last frame EXTRACTION FAILED (gap={actual_gap:.2f}s)"
+    tail = " + 1 last" if added_last else ""
     print(f"[Phase 2a] clip {clip_id:02d}: {len(paths)} key frame(s) "
           f"({len(subshot_kfs)} sub-shot first{tail})")
     return paths
