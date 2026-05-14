@@ -226,7 +226,8 @@ def cmd_vlm(args: argparse.Namespace) -> int:
         try:
             script = analyse_clip(clip.resized_path,
                                   api_key=cfg.api_key,
-                                  fps=cfg.analyse_fps)
+                                  fps=cfg.analyse_fps,
+                                  clip_id=clip.clip_id)
             lines = script.split("\n")
             try:
                 idx = next(i for i, l in enumerate(lines) if "## CLIP PROMPT" in l)
@@ -473,7 +474,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
     def check(clip):
         try:
-            passed, reason = verify_anime_style(clip.output_url, api_key=cfg.api_key)
+            passed, reason = verify_anime_style(clip.output_url, api_key=cfg.api_key,
+                                                 clip_id=clip.clip_id)
             return clip, passed, reason, None
         except Exception as e:
             return clip, False, "", str(e)
@@ -677,6 +679,54 @@ def cmd_install_skill(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_billing(args: argparse.Namespace) -> int:
+    """聚合并显示项目的 Seedream / VLM / Seedance 用量。"""
+    from video_cartoonize import billing as bl
+
+    work_dir = _work_dir(args)
+    summary  = bl.summarize(work_dir)
+
+    if getattr(args, "json", False):
+        _out(summary)
+        return 0
+
+    totals = summary["totals"]
+    sd, v, dn = totals["seedream"], totals["vlm"], totals["seedance"]
+
+    print(f"工作目录: {work_dir}")
+    print(f"总记录数: {summary['records']}")
+    print()
+    print("Seedream (图片生成)")
+    print(f"  调用次数:   {sd['calls']}")
+    print(f"  生成图片数: {sd['images']}")
+    if sd['models']:
+        print(f"  模型:       {sd['models']}")
+    print()
+    print("VLM (Seed 2.0 Lite 视频分析 + 风格校验)")
+    print(f"  调用次数:        {v['calls']}")
+    print(f"  prompt_tokens:   {v['prompt_tokens']:>10,}")
+    print(f"  completion_tok:  {v['completion_tokens']:>10,}")
+    print(f"  total_tokens:    {v['total_tokens']:>10,}")
+    if v['models']:
+        print(f"  模型:            {v['models']}")
+    print()
+    print("Seedance (视频生成)")
+    print(f"  提交次数:        {dn['calls']}")
+    print(f"  累计输出秒数:    {dn['duration_seconds']} s")
+    if dn['models']:
+        print(f"  模型:            {dn['models']}")
+
+    if getattr(args, "by_clip", False) and summary["by_clip"]:
+        print()
+        print("Per-clip 明细:")
+        for cid in sorted(summary["by_clip"].keys(), key=lambda x: int(x)):
+            bc = summary["by_clip"][cid]
+            print(f"  clip_{int(cid):02d}: vlm={bc['vlm_calls']}/{bc['vlm_tokens']}tok  "
+                  f"seedream={bc['seedream_calls']}  "
+                  f"seedance={bc['seedance_calls']}/{bc['seedance_duration_s']}s")
+    return 0
+
+
 def cmd_version(args: argparse.Namespace) -> int:
     """显示 CLI 版本、Python 版本、安装位置。"""
     import platform
@@ -811,12 +861,26 @@ def build_parser() -> argparse.ArgumentParser:
     # version
     sub.add_parser("version", help="显示版本信息")
 
+    # billing
+    p = sub.add_parser("billing", help="显示项目 Seedream/VLM/Seedance 用量汇总")
+    _add_work_dir(p)
+    p.add_argument("--by-clip", action="store_true", help="同时显示每个 clip 的明细")
+    p.add_argument("--json",    action="store_true", help="输出原始 JSON（而非格式化文本）")
+
     return root
 
 
 def main() -> int:
     parser = build_parser()
     args   = parser.parse_args()
+
+    # 设置当前项目，所有 API 调用的 billing 都写到这里
+    from video_cartoonize import billing as _billing
+    if hasattr(args, "work_dir") and args.work_dir:
+        _billing.set_project(args.work_dir)
+    elif args.cmd == "init":
+        # init 的 work_dir 是动态生成的，cmd_init 内部不需要 billing
+        pass
 
     dispatch = {
         "init":      cmd_init,
@@ -834,6 +898,7 @@ def main() -> int:
         "doctor":        cmd_doctor,
         "install-skill": cmd_install_skill,
         "version":       cmd_version,
+        "billing":       cmd_billing,
     }
 
     if args.cmd == "styles":

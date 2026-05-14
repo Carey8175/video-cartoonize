@@ -99,6 +99,9 @@ cartoonize mux         → Phase 6: 下载 + 合并原始音轨
     │
     ▼
 cartoonize merge       → Phase 7: 拼接最终视频
+
+cartoonize billing     → 查看项目 Seedream/VLM/Seedance 用量
+cartoonize status      → 查看当前流水线进度
 ```
 
 ---

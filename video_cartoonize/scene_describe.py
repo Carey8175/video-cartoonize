@@ -6,6 +6,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional
 
+from video_cartoonize import billing
 from video_cartoonize.sub_shot_detect import extract_sub_shot_keyframes
 
 _ARK_IMAGE_URL = "https://ark.ap-southeast.bytepluses.com/api/v3/images/generations"
@@ -18,6 +19,7 @@ def _seedream_i2i(
     prompt: str,
     model: str = "seedream-5-0-260128",
     size: str = "1440x2560",
+    clip_id: int | None = None,
 ) -> Optional[bytes]:
     all_paths = [frame_path] + style_ref_paths[:13]
     image_refs = []
@@ -47,7 +49,11 @@ def _seedream_i2i(
             result = json.loads(resp.read())
         img_url = result["data"][0]["url"]
         with urllib.request.urlopen(img_url, timeout=60) as r:
-            return r.read()
+            img_bytes = r.read()
+        # 记账：每次成功一次 Seedream I2I 生成一张图
+        billing.record("seedream", clip_id=clip_id, model=model, size=size,
+                       images=1, ref_count=len(image_refs))
+        return img_bytes
     except Exception as e:
         print(f"[Seedream I2I] error: {e}")
         return None
@@ -150,6 +156,7 @@ def cartoonize_subshot_frames(
             prompt=style.seedream_prompt,
             model=model,
             size=size,
+            clip_id=clip_id,
         )
         if img_bytes:
             with open(cartoon_path, "wb") as f:

@@ -5,6 +5,7 @@ import json
 import urllib.error
 import urllib.request
 
+from video_cartoonize import billing
 from video_cartoonize.ark_client import load_api_key
 from video_cartoonize.tos_client import upload_file
 from video_cartoonize.vlm_prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
@@ -26,6 +27,8 @@ def _call_seed_video(
     model: str = DEFAULT_MODEL,
     fps: float = 4,
     max_tokens: int = 4096,
+    clip_id: int | None = None,
+    purpose: str = "analyse",
 ) -> str:
     payload = json.dumps({
         "model": model,
@@ -58,6 +61,18 @@ def _call_seed_video(
         body = exc.read().decode(errors="replace")
         raise RuntimeError(f"Seed API HTTP {exc.code}: {body}") from exc
 
+    # 记账：从 usage 字段提取 token
+    usage = (data.get("usage") or {})
+    billing.record(
+        "vlm",
+        clip_id=clip_id,
+        model=model,
+        purpose=purpose,
+        prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+        completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+        total_tokens=int(usage.get("total_tokens", 0) or 0),
+    )
+
     return data["choices"][0]["message"]["content"]
 
 
@@ -68,6 +83,7 @@ def analyse_clip(
     model: str = DEFAULT_MODEL,
     fps: float = 4,
     lang: str = "en",
+    clip_id: int | None = None,
 ) -> str:
     """Analyse one clip and return a per-beat timeline prompt."""
     resolved_key = load_api_key(api_key)
@@ -90,6 +106,8 @@ def analyse_clip(
         api_key=resolved_key,
         model=model,
         fps=fps,
+        clip_id=clip_id,
+        purpose="analyse",
     )
 
 
@@ -118,6 +136,7 @@ def verify_anime_style(
     api_key: str | None = None,
     model: str = DEFAULT_MODEL,
     fps: float = 2,
+    clip_id: int | None = None,
 ) -> tuple[bool, str]:
     """让 VLM 判断视频是不是动漫/卡通风格。
 
@@ -137,6 +156,8 @@ def verify_anime_style(
         model=model,
         fps=fps,
         max_tokens=256,
+        clip_id=clip_id,
+        purpose="verify",
     ).strip()
 
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
