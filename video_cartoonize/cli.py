@@ -510,10 +510,15 @@ def cmd_run(args: argparse.Namespace) -> int:
        "phases": {cartoon, vlm, upload, submit ⇒ ok|err}}
     """
     import threading
+    import time as _time
+    from video_cartoonize.logsetup import log_clip_event
     global _SUPPRESS_OUT, _captured_out
 
-    clip_id = args.clip_id
+    clip_id  = args.clip_id
+    work_dir = _work_dir(args)
     started_at = datetime.now().isoformat(timespec="seconds")
+    t0 = _time.time()
+    log_clip_event(work_dir, clip_id, "run.start")
 
     # 抑制子命令的 _out 输出，最后聚合
     _captured_out.clear()
@@ -545,10 +550,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         def _vlm():
             vlm_rc[0] = cmd_vlm(args)
 
+        t_phase_start = _time.time()
         t_c = threading.Thread(target=_cartoon)
         t_v = threading.Thread(target=_vlm)
         t_c.start(); t_v.start()
         t_c.join();  t_v.join()
+        log_clip_event(work_dir, clip_id, "run.cartoon_vlm_done",
+                       cartoon_rc=cartoon_rc[0], vlm_rc=vlm_rc[0],
+                       duration_s=round(_time.time() - t_phase_start, 1))
 
         # 汇总 cartoon 和 vlm phase（按 captured_out 顺序无法精准分，
         # 用 max(snap_c, snap_v) 之后的输出聚合）
@@ -561,30 +570,40 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         if cartoon_rc[0] != 0:
             err = next((o for o in _captured_out[snap_c:] if o.get("status") == "error"), None)
+            log_clip_event(work_dir, clip_id, "run.error", stage="cartoon", error=err)
             _SUPPRESS_OUT = False
             _out({"status": "error", "stage": "cartoon", "clip_id": clip_id,
                   "error": err, "phases": phases})
             return cartoon_rc[0]
         if vlm_rc[0] != 0:
             err = next((o for o in _captured_out[snap_v:] if o.get("status") == "error"), None)
+            log_clip_event(work_dir, clip_id, "run.error", stage="vlm", error=err)
             _SUPPRESS_OUT = False
             _out({"status": "error", "stage": "vlm", "clip_id": clip_id,
                   "error": err, "phases": phases})
             return vlm_rc[0]
 
         # 2) upload
+        t_phase_start = _time.time()
         rc = _run_phase("upload", cmd_upload)
+        log_clip_event(work_dir, clip_id, "run.upload_done", rc=rc,
+                       duration_s=round(_time.time() - t_phase_start, 1))
         if rc != 0:
             err = phases["upload"].get("summary")
+            log_clip_event(work_dir, clip_id, "run.error", stage="upload", error=err)
             _SUPPRESS_OUT = False
             _out({"status": "error", "stage": "upload", "clip_id": clip_id,
                   "error": err, "phases": phases})
             return rc
 
         # 3) submit
+        t_phase_start = _time.time()
         rc = _run_phase("submit", cmd_submit)
+        log_clip_event(work_dir, clip_id, "run.submit_done", rc=rc,
+                       duration_s=round(_time.time() - t_phase_start, 1))
         if rc != 0:
             err = phases["submit"].get("summary")
+            log_clip_event(work_dir, clip_id, "run.error", stage="submit", error=err)
             _SUPPRESS_OUT = False
             _out({"status": "error", "stage": "submit", "clip_id": clip_id,
                   "error": err, "phases": phases})
@@ -592,6 +611,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         submit_out = phases["submit"].get("summary") or {}
         if submit_out.get("status") == "dry_run":
+            log_clip_event(work_dir, clip_id, "run.dry_run")
             _SUPPRESS_OUT = False
             _out({"status": "dry_run", "clip_id": clip_id,
                   "preview": submit_out.get("preview"), "phases": phases})
@@ -601,6 +621,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         first = submitted[0] if submitted else {}
         task_id = first.get("task_id", "")
         mode    = first.get("mode", "")
+        log_clip_event(work_dir, clip_id, "run.end",
+                       task_id=task_id, mode=mode,
+                       total_duration_s=round(_time.time() - t0, 1))
 
         _SUPPRESS_OUT = False
         _out({
@@ -649,6 +672,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
     from video_cartoonize.core import poll_task
     from video_cartoonize.ark_client import STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED
     from video_cartoonize.vlm import verify_anime_style
+    from video_cartoonize.logsetup import log_clip_event
 
     work_dir = _work_dir(args)
     s        = st.require(work_dir)
@@ -667,6 +691,9 @@ def cmd_poll(args: argparse.Namespace) -> int:
             return 1
 
         clip = targets[0]
+
+        log_clip_event(work_dir, clip_id, "poll.check",
+                       task_id=clip.task_id, verify_attempts=clip.verify_attempts)
 
         # ① 已经完成的 clip：直接报 done（含兜底/通过）
         if clip.style_verified:
@@ -702,6 +729,8 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
         # 仍在跑
         if api_status not in (STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED):
+            log_clip_event(work_dir, clip_id, "poll.running",
+                           task_id=clip.task_id, api_status=api_status)
             _out({"status": "running", "clip_id": clip.clip_id,
                   "task_id": clip.task_id, "api_status": api_status})
             return 1
@@ -715,6 +744,8 @@ def cmd_poll(args: argparse.Namespace) -> int:
                 s2 = st.require(work_dir)
                 st.merge_clip_fields(s2, clip.clip_id, status="failed")
                 st.save(work_dir, s2)
+            log_clip_event(work_dir, clip_id, "poll.seedance_failed",
+                           api_status=api_status, error=err_msg)
             _out({"status": "done", "clip_id": clip.clip_id,
                   "video_url": "", "seedance_status": api_status,
                   "error": err_msg, "note": "Seedance task failed (not style)"})
@@ -765,6 +796,9 @@ def cmd_poll(args: argparse.Namespace) -> int:
                                      verify_reason=reason,
                                      attempts=clip.attempts)
                 st.save(work_dir, s2)
+            log_clip_event(work_dir, clip_id, "poll.verify_pass",
+                           video_url=video_url, attempts=clip.verify_attempts,
+                           reason=reason[:200])
             _out({"status": "done", "clip_id": clip.clip_id,
                   "video_url": video_url,
                   "style_verified": True,
@@ -835,6 +869,9 @@ def cmd_poll(args: argparse.Namespace) -> int:
                                      verify_reason=reason,
                                      attempts=clip.attempts)
                 st.save(work_dir, s2)
+            log_clip_event(work_dir, clip_id, "poll.verify_fail_resubmit",
+                           attempts=clip.verify_attempts, mode=mode,
+                           new_task_id=new_task_id, reason=reason[:200])
             _out({"status": "running", "clip_id": clip.clip_id,
                   "task_id": new_task_id, "mode": mode,
                   "verify_attempts": clip.verify_attempts,
@@ -853,6 +890,9 @@ def cmd_poll(args: argparse.Namespace) -> int:
                                      verify_reason=reason,
                                      attempts=clip.attempts)
                 st.save(work_dir, s2)
+            log_clip_event(work_dir, clip_id, "poll.fallback",
+                           attempts=clip.verify_attempts, video_url=video_url,
+                           reason=reason[:200])
             _out({"status": "done", "clip_id": clip.clip_id,
                   "video_url": video_url,
                   "style_verified": False,
@@ -1015,6 +1055,7 @@ def cmd_mux(args: argparse.Namespace) -> int:
     from video_cartoonize import state as st
     from video_cartoonize.video_utils import download_url
     from video_cartoonize.core import mux_original_audio
+    from video_cartoonize.logsetup import log_clip_event
 
     work_dir  = _work_dir(args)
     s         = st.require(work_dir)
@@ -1033,13 +1074,20 @@ def cmd_mux(args: argparse.Namespace) -> int:
         final_path = os.path.join(final_dir, f"clip_{clip.clip_id:02d}.mp4")
         try:
             download_url(clip.output_url, cart_path)
+            log_clip_event(work_dir, clip.clip_id, "mux.download",
+                           video_url=clip.output_url, local_path=cart_path)
         except Exception as e:
             clip.status = "failed"
+            log_clip_event(work_dir, clip.clip_id, "mux.error",
+                           stage="download", error=str(e))
             results.append({"clip_id": clip.clip_id, "status": "download_failed",
                              "error": str(e)})
             continue
         ok = mux_original_audio(cart_path, clip.resized_path, final_path)
         clip.output_path = final_path if ok else cart_path
+        log_clip_event(work_dir, clip.clip_id,
+                       "mux.muxed" if ok else "mux.mux_failed",
+                       output=clip.output_path)
         results.append({"clip_id": clip.clip_id, "status": "ok",
                          "output": clip.output_path})
 
@@ -1214,6 +1262,42 @@ def cmd_billing(args: argparse.Namespace) -> int:
                   f"sdr={bc['seedream_calls']}/{bc['seedream_tokens']}tok  "
                   f"vlm={bc['vlm_calls']}/{bc['vlm_tokens']}tok  "
                   f"sdn={bc['seedance_calls']}/{bc['seedance_duration_s']}s/{bc['seedance_tokens']}tok")
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    """显示指定 clip 的事件日志（来自 <work_dir>/logs/clip_NN.jsonl）。"""
+    work_dir = _work_dir(args)
+    clip_id  = args.clip_id
+    log_path = os.path.join(work_dir, "logs", f"clip_{clip_id:02d}.jsonl")
+    if not os.path.exists(log_path):
+        _out({"status": "error", "error_type": "NoLog",
+              "message": f"日志文件不存在: {log_path}"})
+        return 1
+
+    events = []
+    with open(log_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            try:
+                events.append(json.loads(line))
+            except Exception:
+                continue
+
+    if getattr(args, "json", False):
+        _out({"status": "ok", "clip_id": clip_id,
+              "log_path": log_path, "events": events})
+        return 0
+
+    print(f"日志: {log_path}  ({len(events)} 个事件)")
+    print("─" * 70)
+    for e in events:
+        ts = e.get("ts", "")
+        ev = e.get("event", "?")
+        extras = {k: v for k, v in e.items() if k not in ("ts", "event")}
+        extras_str = " ".join(f"{k}={v}" for k, v in extras.items() if v not in (None, ""))
+        print(f"{ts}  {ev:<26}  {extras_str[:160]}")
     return 0
 
 
@@ -1458,6 +1542,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--by-clip", action="store_true", help="同时显示每个 clip 的明细")
     p.add_argument("--json", action="store_true", help="输出原始 JSON（而非格式化文本）")
 
+    # logs
+    p = sub.add_parser("logs", help="显示某 clip 的事件日志")
+    _add_work_dir(p)
+    p.add_argument("--clip-id", type=int, required=True, metavar="N",
+                   help="要查看日志的 clip 编号")
+    p.add_argument("--json", action="store_true", help="输出原始 JSON")
+
     # estimate
     p = sub.add_parser("estimate", help="基于已发生的成本预估项目总成本")
     _add_work_dir(p)
@@ -1499,6 +1590,7 @@ def main() -> int:
         "version":       cmd_version,
         "billing":       cmd_billing,
         "estimate":      cmd_estimate,
+        "logs":          cmd_logs,
     }
 
     if args.cmd == "styles":

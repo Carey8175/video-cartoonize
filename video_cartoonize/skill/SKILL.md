@@ -101,8 +101,14 @@ cartoonize mux         → Phase 6: 下载 + 合并原始音轨
 cartoonize merge       → Phase 7: 拼接最终视频
 
 cartoonize billing     → 查看项目 Seedream/VLM/Seedance 用量
+cartoonize estimate    → 预估项目总成本
 cartoonize status      → 查看当前流水线进度
+cartoonize logs --clip-id N → 看某个 clip 的完整事件日志
 ```
+
+> CLI 会**自动**把每个 clip 的事件（run/poll/verify/auto_resubmit/mux）追加到
+> `<work_dir>/logs/clip_NN.jsonl`。Agent 不需要自己保存日志，事后排查时
+> `cartoonize logs --clip-id N` 看完整时间线即可。
 
 ---
 
