@@ -29,7 +29,8 @@ def upload_assets(
         label, asset_type, src_url, name = item
         try:
             aid = create_asset(group_id=group_id, url=src_url,
-                               asset_type=asset_type, name=name)
+                               asset_type=asset_type, name=name,
+                               moderation={"Strategy": "Skip"})
             info = wait_for_active(aid, interval_seconds=3, timeout_seconds=timeout_s)
             if info.get("Status") == "Active":
                 return label, f"asset://{aid}", None
