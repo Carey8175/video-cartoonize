@@ -49,11 +49,11 @@ SUPPORTED_RATIOS = {
 
 def build_preamble(style_description: str) -> str:
     return (
-        "这是一个动漫生成任务，视频里所有的元素和人物都需要是指定的漫画风格，"
-        "不能出现真实的场景。"
-        "Generate a brand-new fully-animated video, do NOT keep any live-action / "
-        "photoreal / real-person footage. "
-        "Follow the action, motion, and plot from the reference video exactly. "
+        "This is an ANIME generation task. Every element and character in the "
+        "output video MUST be in the specified animated/cartoon style — no "
+        "real-life scenes, no photoreal humans, no live-action footage is allowed. "
+        "Follow the action, motion, and plot from the reference video exactly, "
+        "but render everything in the target animated style. "
         "Use the reference key frame images to determine the visual style and "
         "character appearance for the generated video. "
         f"Target style: {style_description}"
