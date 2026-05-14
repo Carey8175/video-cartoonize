@@ -223,16 +223,16 @@ cartoonize keyframes --work-dir ./my_output
 
 ### Step 2b–5a — 流水线 + 收割模式（★ 必须使用）
 
-整个流程分两个**并行的工作流**，**绝不要在 poll 上 sleep 等待**：
+**Agent 唯一需要调度的命令是 `cartoonize run --clip-id N`**——它一站式跑 cartoon+vlm+upload+submit，返回 task_id。
 
 ```
-工作流 A：主动推进（CPU/HTTP 密集，限并发 6）
-  cartoon → vlm → upload → submit
-  ↓
+工作流 A：主动推进（限并发 6）
+  cartoonize run --clip-id N    ← 内部并行 cartoon+vlm, 串行 upload→submit
+  ↓ 返回 {task_id, mode}
   clip 进入 "awaiting_poll" 池
 
-工作流 B：被动收割（每次循环都做一次，不阻塞）
-  cartoonize poll           ← 一次性查所有 awaiting_poll 的 clip 状态
+工作流 B：被动收割（每次循环 30s 一次，不阻塞）
+  cartoonize poll               ← 一次性查所有任务状态
     ↓ 已 succeeded 的 clip
   cartoonize verify --clip-id N
     ↓ pass → 完成
@@ -254,90 +254,82 @@ cartoonize keyframes --work-dir ./my_output
 
 ```python
 N = 6
-todo         = list(range(total_clips))   # 待启动 stage 1
-stage1       = {}                          # cid → BackgroundTask（cartoon→…→submit）
-awaiting     = set()                       # 已 submit、等 poll 结果
-verify_left  = {cid: 3 for cid in todo}   # 每个 clip 还剩几次 verify 机会
-done         = set()                       # 永久完成（pass 或 attempts 用尽）
+todo         = list(range(total_clips))
+stage1       = {}                          # cid → BackgroundTask("cartoonize run --clip-id N")
+awaiting     = set()                       # 已 submit、等 poll
+verify_left  = {cid: 3 for cid in todo}
+done         = set()
 
 while todo or stage1 or awaiting:
-    # ── 1. 填充工作流 A ─────────────────────────────────────
+    # 1. 填充工作流 A（每个 clip 一行命令）
     while len(stage1) < N and todo:
         cid = todo.pop(0)
         stage1[cid] = run_in_background(
-            f"""cartoonize cartoon --work-dir ./out --clip-id {cid} &
-                cartoonize vlm     --work-dir ./out --clip-id {cid} &
-                wait
-                cartoonize upload  --work-dir ./out --clip-id {cid}
-                cartoonize submit  --work-dir ./out --clip-id {cid}"""
+            f"cartoonize run --work-dir ./out --clip-id {cid}"
         )
 
-    # ── 2. 收割完成的 stage 1（不阻塞，只检查已完成的）─────
+    # 2. 收割完成的 stage 1
     for cid in list(stage1):
         if stage1[cid].is_done():
             del stage1[cid]
             awaiting.add(cid)
 
-    # ── 3. 调一次 poll 看哪些 Seedance 完成了 ──────────────
-    poll = cartoonize_poll()   # 全量，秒级
+    # 3. 一次性 poll + verify
+    poll = cartoonize_poll()           # 秒级返回
     for clip in poll["clips"]:
         cid = clip["clip_id"]
-        if cid not in awaiting:        continue
+        if cid not in awaiting:           continue
         if clip["status"] == "success":
-            # 立刻 verify
             v = cartoonize_verify(clip_id=cid)
             awaiting.discard(cid)
             if v["passed"]:
                 done.add(cid)
             elif verify_left[cid] > 0:
                 verify_left[cid] -= 1
-                todo.append(cid)          # 回到工作流 A 重做（submit 会自动 image-only 第 3 次）
+                todo.append(cid)            # 重新 run 一次，submit 会自动 image-only 第 3 次
             else:
-                done.add(cid)             # 重试次数用完，放弃
+                done.add(cid)               # 用完重试次数
         elif clip["status"] == "failed":
             awaiting.discard(cid)
             done.add(cid)
 
-    # ── 4. 短 sleep 避免空转 ───────────────────────────────
+    # 4. 短 sleep 避免空转
     if stage1 or awaiting:
-        sleep(30)   # 30s 后回到循环顶部继续 poll
+        sleep(30)
 ```
 
-**Bash 简化版（不要 sleep loop 卡死）：**
+**Bash 简化版：**
 
 ```bash
-# 每个 clip 的工作流 A（后台并发跑，最多 6 个）
-run_stage1() {
-  local cid=$1
-  cartoonize cartoon --work-dir ./out --clip-id $cid &
-  cartoonize vlm     --work-dir ./out --clip-id $cid &
-  wait
-  cartoonize upload  --work-dir ./out --clip-id $cid
-  cartoonize submit  --work-dir ./out --clip-id $cid
-}
-
-# 主循环：先把 N 个 clip 启动到 stage 1，然后边推进边 poll/verify
-# 不要在任何一个 clip 上单独 wait Seedance 完成
+# 启动 N=6 个 run 在后台
+for cid in 0 1 2 3 4 5; do
+  cartoonize run --work-dir ./out --clip-id $cid &
+done
+# 一个完成就立刻塞下一个进来，30s 一次 poll，详见上面伪代码
 ```
 
-> **关键点：** Agent 启动 6 个 clip 的 stage 1 后，**立刻继续推进**下一批 clip 进入 stage 1。Seedance 后台跑（每个 clip 2-5min），agent 用这段时间继续做 cartoon/vlm/upload。每隔 30s 调一次 `cartoonize poll` 收割已完成的，立即 verify。
+> **关键点：** `cartoonize run --clip-id N` 是 agent 调度的**唯一**主命令。它内部已经处理好 cartoon/vlm/upload/submit 的并行+串行依赖，返回 `{task_id, mode}` 给 agent。
 
 #### ⚠️ 反面案例
 
 ```bash
-# ❌ 死等单 clip 的 Seedance —— agent 完全闲置
-cartoonize submit --clip-id 0
-until cartoonize poll --clip-id 0; do sleep 30; done   # ← 卡 5min！
-cartoonize verify --clip-id 0
-# 然后才开始 clip 1，浪费时间
+# ❌ 不要自己拼 4 个子命令，用 run 一站式
+cartoonize cartoon --clip-id 0
+cartoonize vlm     --clip-id 0
+cartoonize upload  --clip-id 0
+cartoonize submit  --clip-id 0
 ```
 
 ```bash
-# ❌ 同时启动全部 52 个 clip 的 cartoon ——会被服务端限速 / 拒绝
-for i in $(seq 0 51); do
-  cartoonize cartoon --work-dir ./out --clip-id $i &
-done
-wait
+# ❌ 死等单 clip 的 Seedance —— agent 完全闲置
+cartoonize run --clip-id 0
+until cartoonize poll --clip-id 0; do sleep 30; done   # ← 卡 5min！
+```
+
+```bash
+# ❌ 不带 --clip-id 跑全量，所有 63 个 clip 一次性串行处理
+cartoonize cartoon
+cartoonize vlm
 ```
 
 ```bash

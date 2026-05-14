@@ -68,6 +68,8 @@ SEEDANCE_MODEL_ALIASES = {
 }
 
 
+
+
 def _resolve_seedance_model(alias_or_id: str) -> str:
     """把 'standard'/'fast'/原 ID 都正规化成真实 endpoint ID。"""
     a = (alias_or_id or "standard").strip().lower()
@@ -488,6 +490,128 @@ def cmd_submit(args: argparse.Namespace) -> int:
         st.save(work_dir, s2)
     _out({"status": "ok", "ratio": ratio, "submitted": submitted})
     return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """★ Agent 主入口：对单个 clip 一站式跑 cartoon + vlm + upload + submit。
+
+    内部:
+      1. cartoon + vlm 并行（独立输入，互不依赖）
+      2. upload（TOS + Assets API）
+      3. submit（Seedance 任务）
+
+    返回（成功时）:
+      {"status": "ok", "clip_id": N, "task_id": "cgt-...",
+       "mode": "video+image"|"image-only",
+       "phases": {cartoon, vlm, upload, submit ⇒ ok|err}}
+    """
+    import threading
+    global _SUPPRESS_OUT, _captured_out
+
+    clip_id = args.clip_id
+    started_at = datetime.now().isoformat(timespec="seconds")
+
+    # 抑制子命令的 _out 输出，最后聚合
+    _captured_out.clear()
+    _SUPPRESS_OUT = True
+    phases: dict = {}
+
+    def _run_phase(name: str, fn) -> int:
+        snapshot = len(_captured_out)
+        rc = fn(args)
+        # 取该 phase 期间最后一次 _out
+        new_outs = _captured_out[snapshot:]
+        last = new_outs[-1] if new_outs else None
+        phases[name] = {
+            "rc":     rc,
+            "status": (last or {}).get("status", "?"),
+            "summary": last,
+        }
+        return rc
+
+    try:
+        # 1) cartoon + vlm 并行
+        cartoon_rc = [0]
+        vlm_rc     = [0]
+        snap_c = len(_captured_out)
+        snap_v = len(_captured_out)
+
+        def _cartoon():
+            cartoon_rc[0] = cmd_cartoon(args)
+        def _vlm():
+            vlm_rc[0] = cmd_vlm(args)
+
+        t_c = threading.Thread(target=_cartoon)
+        t_v = threading.Thread(target=_vlm)
+        t_c.start(); t_v.start()
+        t_c.join();  t_v.join()
+
+        # 汇总 cartoon 和 vlm phase（按 captured_out 顺序无法精准分，
+        # 用 max(snap_c, snap_v) 之后的输出聚合）
+        cartoon_out = [o for o in _captured_out[snap_c:] if "clips" in o and o.get("clips") and isinstance(o["clips"], list) and (o["clips"][0].get("cartoons") if o["clips"] else None) is not None]
+        vlm_out     = [o for o in _captured_out[snap_v:] if "prompts" in o]
+        phases["cartoon"] = {"rc": cartoon_rc[0],
+                             "summary": cartoon_out[-1] if cartoon_out else None}
+        phases["vlm"]     = {"rc": vlm_rc[0],
+                             "summary": vlm_out[-1] if vlm_out else None}
+
+        if cartoon_rc[0] != 0:
+            err = next((o for o in _captured_out[snap_c:] if o.get("status") == "error"), None)
+            _SUPPRESS_OUT = False
+            _out({"status": "error", "stage": "cartoon", "clip_id": clip_id,
+                  "error": err, "phases": phases})
+            return cartoon_rc[0]
+        if vlm_rc[0] != 0:
+            err = next((o for o in _captured_out[snap_v:] if o.get("status") == "error"), None)
+            _SUPPRESS_OUT = False
+            _out({"status": "error", "stage": "vlm", "clip_id": clip_id,
+                  "error": err, "phases": phases})
+            return vlm_rc[0]
+
+        # 2) upload
+        rc = _run_phase("upload", cmd_upload)
+        if rc != 0:
+            err = phases["upload"].get("summary")
+            _SUPPRESS_OUT = False
+            _out({"status": "error", "stage": "upload", "clip_id": clip_id,
+                  "error": err, "phases": phases})
+            return rc
+
+        # 3) submit
+        rc = _run_phase("submit", cmd_submit)
+        if rc != 0:
+            err = phases["submit"].get("summary")
+            _SUPPRESS_OUT = False
+            _out({"status": "error", "stage": "submit", "clip_id": clip_id,
+                  "error": err, "phases": phases})
+            return rc
+
+        submit_out = phases["submit"].get("summary") or {}
+        if submit_out.get("status") == "dry_run":
+            _SUPPRESS_OUT = False
+            _out({"status": "dry_run", "clip_id": clip_id,
+                  "preview": submit_out.get("preview"), "phases": phases})
+            return 0
+
+        submitted = (submit_out.get("submitted") or [])
+        first = submitted[0] if submitted else {}
+        task_id = first.get("task_id", "")
+        mode    = first.get("mode", "")
+
+        _SUPPRESS_OUT = False
+        _out({
+            "status":  "ok",
+            "clip_id": clip_id,
+            "task_id": task_id,
+            "mode":    mode,
+            "started_at":  started_at,
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+            "phases":  phases,
+        })
+        return 0
+    finally:
+        _SUPPRESS_OUT = False
+        _captured_out.clear()
 
 
 def cmd_poll(args: argparse.Namespace) -> int:
@@ -973,8 +1097,17 @@ def cmd_version(args: argparse.Namespace) -> int:
 # 工具函数
 # ══════════════════════════════════════════════════════════════════════════════
 
+# cmd_run 把它置 True 时，子命令的 _out 输出不会真打到 stdout，
+# 而是被 _captured_out 收集，让 cmd_run 最后输出一个聚合 JSON。
+_SUPPRESS_OUT     = False
+_captured_out: List[dict] = []
+
+
 def _out(data: dict) -> None:
     """输出 JSON 结果（agent 读取用）。"""
+    if _SUPPRESS_OUT:
+        _captured_out.append(data)
+        return
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
@@ -1059,18 +1192,27 @@ def build_parser() -> argparse.ArgumentParser:
     ]:
         _add_work_dir(sub.add_parser(name, help=help_text))
 
-    # cartoon / vlm / upload / submit / verify — 支持 --clip-id 单 clip 模式
+    # run — ★ Agent 主入口：一站式处理单 clip（cartoon+vlm 并行 → upload → submit）
+    p = sub.add_parser("run",
+        help="★ Agent 主入口: 对单个 clip 一站式跑 cartoon+vlm+upload+submit，返回 task_id")
+    _add_work_dir(p)
+    p.add_argument("--clip-id", type=int, required=True, metavar="N",
+                   help="必填: 要处理的 clip 编号")
+    p.add_argument("--dry-run", action="store_true",
+                   help="不实际提交 Seedance，只显示将提交的 prompt 和参数")
+
+    # cartoon / vlm / upload / submit / verify — 单步命令，调试/手动用
     for name, help_text in [
-        ("cartoon", "Phase 2b: Seedream 卡通化（--clip-id 指定单个 clip）"),
-        ("vlm",     "Phase 3: VLM 场景分析（--clip-id 指定单个 clip）"),
-        ("upload",  "Phase 4: TOS + Assets 上传（--clip-id 指定单个 clip）"),
-        ("submit",  "Phase 5a: 提交 Seedance 任务（--clip-id 指定单个 clip）"),
-        ("verify",  "Phase 5c: VLM 校验生成视频是否动漫风格（exit 0=全通过，1=需重试）"),
+        ("cartoon", "Phase 2b 单步: Seedream 卡通化"),
+        ("vlm",     "Phase 3 单步: VLM 场景分析"),
+        ("upload",  "Phase 4 单步: TOS + Assets 上传"),
+        ("submit",  "Phase 5a 单步: 提交 Seedance 任务"),
+        ("verify",  "Phase 5c: VLM 校验生成视频是否动漫风格"),
     ]:
         p = sub.add_parser(name, help=help_text)
         _add_work_dir(p)
         p.add_argument("--clip-id", type=int, default=None, metavar="N",
-                       help="只处理指定 clip（不填则处理全部）")
+                       help="只处理指定 clip（不填则处理全部，agent 不应该用全量）")
         if name == "submit":
             p.add_argument("--dry-run", action="store_true",
                            help="只显示将提交的 prompt 和参数，不实际调用 Seedance")
@@ -1134,6 +1276,7 @@ def main() -> int:
         "vlm":       cmd_vlm,
         "upload":    cmd_upload,
         "submit":    cmd_submit,
+        "run":       cmd_run,
         "poll":      cmd_poll,
         "verify":    cmd_verify,
         "mux":       cmd_mux,
