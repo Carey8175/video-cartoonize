@@ -377,6 +377,13 @@ def cmd_submit(args: argparse.Namespace) -> int:
             print(f"[submit] clip_{clip.clip_id:02d}: no asset URL, skip", file=sys.stderr)
             clip.status = "failed"
             continue
+
+        # ── 第 3 次重试（verify_attempts >= 2）改为 image-only 模式 ─────
+        # 前两次失败说明原视频内容在污染输出，第三次甩掉原视频，
+        # 只用 cartoon key frames + timeline prompt 生成。
+        use_ref_video = clip.verify_attempts < 2
+        mode = "image-only" if not use_ref_video else "video+image"
+
         # 取 cmd_vlm 生成的 prompt（含 preamble + "\n\n" + timeline）
         # 在两段之间插入 image 顺序提示（A/B 测试胜出的简洁版）
         base_prompt = prompts.get(clip.clip_id, preamble)
@@ -388,10 +395,13 @@ def cmd_submit(args: argparse.Namespace) -> int:
             prompt = f"{base_prompt}\n\n{hint}"
         else:
             prompt = base_prompt
-        task_id = submit_clip(cfg.api_key, clip, vid_url, prompt, ratio, cfg)
+
+        task_id = submit_clip(cfg.api_key, clip, vid_url, prompt, ratio, cfg,
+                              use_reference_video=use_ref_video)
         if task_id:
             clip.task_id = task_id
-            submitted.append({"clip_id": clip.clip_id, "task_id": task_id})
+            submitted.append({"clip_id": clip.clip_id, "task_id": task_id,
+                              "attempt": clip.verify_attempts + 1, "mode": mode})
         else:
             clip.status = "failed"
 

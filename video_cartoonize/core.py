@@ -141,9 +141,17 @@ def submit_clip(
     prompt: str,
     ratio: str,
     cfg: PipelineConfig,
+    use_reference_video: bool = True,
 ) -> Optional[str]:
-    """Submit one clip to Seedance. Returns task_id or None on error."""
+    """Submit one clip to Seedance. Returns task_id or None on error.
+
+    use_reference_video:
+      True  → 传原视频作动作参考（默认，前两次重试）
+      False → 不传原视频，只用 key frame images + prompt timeline 生成
+              （第三次重试用，避免原视频真人内容污染输出）
+    """
     image_urls = list(clip.subshot_cartoon_urls) or None
+    video_urls = [clip_video_url] if (use_reference_video and clip_video_url) else None
     # 用原片时长向上取整作为 Seedance duration（保证生成视频 ≥ 原片）
     duration = seedance_duration_for(clip.resized_path, fallback=5)
     try:
@@ -151,7 +159,7 @@ def submit_clip(
             api_key=api_key,
             prompt=prompt,
             image_urls=image_urls,
-            video_urls=[clip_video_url],
+            video_urls=video_urls,
             model=cfg.seedance_model,
             ratio=ratio,
             duration=duration,

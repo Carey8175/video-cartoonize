@@ -446,6 +446,16 @@ cartoonize verify --work-dir ./my_output
   都保留为最后一次的结果，status=success 不变，仅 `style_verified=false`。
   mux 时仍会处理（用最后一次的视频作兜底）
 
+**🎯 提交策略（cmd_submit 自动切换）：**
+
+| 重试次数 | 模式 | 输入 | 适用场景 |
+|---------|------|------|---------|
+| 第 1 次（attempts=0）| `video+image` | 原视频 + cartoon key frames | 默认模式，动作参考最强 |
+| 第 2 次（attempts=1）| `video+image` | 同上 | 第 1 次失败，可能是偶然，重试 |
+| **第 3 次（attempts=2）**| **`image-only`** | **只传 key frames，不传原视频** | 前两次都被原视频污染，甩掉原视频靠 timeline + key frames 重建 |
+
+submit 输出的 JSON 会带 `"mode": "video+image"` / `"image-only"`，agent 可以看到当前用的哪种模式。
+
 每个 clip 在 state.json 里的 `attempts` 字段记录所有历次结果：
 ```json
 "attempts": [
