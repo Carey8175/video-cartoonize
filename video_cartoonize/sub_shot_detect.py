@@ -7,26 +7,38 @@ from scenedetect import open_video, SceneManager
 from scenedetect.detectors import ContentDetector
 
 
-def detect_sub_shots(clip_path: str, threshold: float = 27.0) -> List[float]:
+# PySceneDetect 默认 min_scene_len=15 帧（24fps ≈ 0.6s）会把极短镜头
+# 合并到下一个，导致短剧封面（≈ 0.2s）这种"开头一闪而过"的镜头被吞掉。
+# 改成 5 帧（≈ 0.2s），实测对正常 clip 几乎无影响（21 clip 中 17 个不变），
+# 但能救回封面/快切。
+DEFAULT_MIN_SCENE_LEN = 5
+
+
+def detect_sub_shots(
+    clip_path: str,
+    threshold: float = 27.0,
+    min_scene_len: int = DEFAULT_MIN_SCENE_LEN,
+) -> List[float]:
     """Return sub-shot start times (seconds). Always includes 0.0."""
     video = open_video(clip_path)
     sm = SceneManager()
-    sm.add_detector(ContentDetector(threshold=threshold))
+    sm.add_detector(ContentDetector(threshold=threshold, min_scene_len=min_scene_len))
     sm.detect_scenes(video=video)
     scenes = sm.get_scene_list()
     if not scenes:
         return [0.0]
-    return [round(start.get_seconds(), 3) for start, _end in scenes]
+    return [round(start.seconds, 3) for start, _end in scenes]
 
 
 def extract_sub_shot_keyframes(
     clip_path: str,
     out_dir: str,
     threshold: float = 27.0,
+    min_scene_len: int = DEFAULT_MIN_SCENE_LEN,
 ) -> List[Tuple[float, str]]:
     """Extract first frame of each sub-shot. Returns [(timestamp_s, jpg_path), ...]."""
     os.makedirs(out_dir, exist_ok=True)
-    boundaries = detect_sub_shots(clip_path, threshold)
+    boundaries = detect_sub_shots(clip_path, threshold, min_scene_len)
     out: List[Tuple[float, str]] = []
     clip_stem = Path(clip_path).stem
     for i, t in enumerate(boundaries):
