@@ -48,19 +48,31 @@ SUPPORTED_RATIOS = {
 
 
 def build_preamble(style_description: str) -> str:
+    """Seedance prompt 的固定前置（manhwa_adaptation 风格，A/B 测试胜出）。
+
+    实测对 5 个泄漏真人内容的 clip 通过率 4/5（80%），显著优于其他变体。
+    与 build_image_order_hint() 配合使用，构成完整 prompt 头部。
+    """
     return (
-        "This is a VIDEO REGENERATION task in ANIME style. "
-        "Every element and character in the output video MUST be in the "
-        "specified animated/cartoon style — no real-life scenes, no photoreal "
-        "humans, no live-action footage is allowed in the output. "
-        "DO NOT let any pixel, texture, lighting, or visual content from the "
-        "reference video leak into the generated video. The reference video is "
-        "used ONLY for action/motion/timing reference — treat it as a silent "
-        "motion-capture source, not as visual content. "
-        "Use the reference key frame images (cartoon style) to determine the "
-        "visual style and character appearance for the generated video. "
-        f"Target style: {style_description}"
+        "Task: adapt the live-action reference video into a manhwa/anime "
+        "animated short. Like adapting a TV drama into its animated "
+        "counterpart — same plot, same beats, same camera moves, but the "
+        "entire visual is now hand-drawn animation. Follow the key frame "
+        "images exactly for character design and color palette. No frames of "
+        "the output may resemble live-action footage. "
+        f"Visual style: {style_description}."
     )
+
+
+def build_image_order_hint(n_keyframes: int) -> str:
+    """Image 顺序提示（A/B 实验出来的简洁版，比长形式 +2 通过）。
+
+    n_keyframes <= 1 时返回空（单帧无需排序）。
+    """
+    if n_keyframes <= 1:
+        return ""
+    seq = ", ".join(f"image{i+1}" for i in range(n_keyframes))
+    return f"Use the key frame images in this order: {seq}."
 
 
 def detect_ratio(video_path: str) -> str:

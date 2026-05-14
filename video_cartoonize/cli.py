@@ -350,7 +350,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
     """Phase 5a — 提交 Seedance 任务（--clip-id 指定单个 clip）。"""
     from video_cartoonize import state as st
     from video_cartoonize.styles import get_style
-    from video_cartoonize.core import build_preamble, detect_ratio, submit_clip
+    from video_cartoonize.core import build_preamble, build_image_order_hint, detect_ratio, submit_clip
 
     work_dir = _work_dir(args)
     s        = st.require(work_dir)
@@ -377,7 +377,17 @@ def cmd_submit(args: argparse.Namespace) -> int:
             print(f"[submit] clip_{clip.clip_id:02d}: no asset URL, skip", file=sys.stderr)
             clip.status = "failed"
             continue
-        prompt = prompts.get(clip.clip_id, preamble)
+        # 取 cmd_vlm 生成的 prompt（含 preamble + "\n\n" + timeline）
+        # 在两段之间插入 image 顺序提示（A/B 测试胜出的简洁版）
+        base_prompt = prompts.get(clip.clip_id, preamble)
+        hint = build_image_order_hint(len(clip.subshot_cartoon_urls))
+        if hint and "\n\n" in base_prompt:
+            head, tail = base_prompt.split("\n\n", 1)
+            prompt = f"{head}\n\n{hint}\n\n{tail}"
+        elif hint:
+            prompt = f"{base_prompt}\n\n{hint}"
+        else:
+            prompt = base_prompt
         task_id = submit_clip(cfg.api_key, clip, vid_url, prompt, ratio, cfg)
         if task_id:
             clip.task_id = task_id
