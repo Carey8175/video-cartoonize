@@ -8,10 +8,12 @@ from scenedetect.detectors import ContentDetector
 
 
 # PySceneDetect 默认 min_scene_len=15 帧（24fps ≈ 0.6s）会把极短镜头
-# 合并到下一个，导致短剧封面（≈ 0.2s）这种"开头一闪而过"的镜头被吞掉。
-# 改成 5 帧（≈ 0.2s），实测对正常 clip 几乎无影响（21 clip 中 17 个不变），
-# 但能救回封面/快切。
-DEFAULT_MIN_SCENE_LEN = 5
+# 合并到下一个，导致短剧封面（0.1-0.2s）这种"开头一闪而过"的镜头被吞掉。
+# 改成 3 帧（≈ 0.125s @24fps），实测:
+#   - 21 个 clip 中 17 个保持不变
+#   - 4 个 clip 多抓到真实存在的快切
+#   - 不会过敏（降到 2 帧 Clip-021 会跳到 9 个，已经开始误判）
+DEFAULT_MIN_SCENE_LEN = 3
 
 
 def detect_sub_shots(
