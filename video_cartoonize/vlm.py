@@ -91,3 +91,56 @@ def analyse_clip(
         model=model,
         fps=fps,
     )
+
+
+# ── 风格校验 ─────────────────────────────────────────────────────────────────
+
+_VERIFY_SYSTEM = (
+    "You are a strict visual style classifier. "
+    "Look at the video and decide whether it is rendered in an animated / "
+    "cartoon / anime / manga / manhwa / manhua / Pixar-3D / illustration style "
+    "(i.e. clearly NOT real-life live-action footage)."
+)
+
+_VERIFY_USER = (
+    "Answer in this exact format, nothing else:\n"
+    "LINE 1: 'YES' if the video is unambiguously animated/cartoon/anime style, "
+    "else 'NO' if it still looks like real-life footage, photorealistic CGI, "
+    "or mixed (real face + cartoon background, etc.).\n"
+    "LINE 2: one short sentence explaining the call.\n"
+    "Be strict: any real-person face = NO."
+)
+
+
+def verify_anime_style(
+    clip_path_or_url: str,
+    *,
+    api_key: str | None = None,
+    model: str = DEFAULT_MODEL,
+    fps: float = 2,
+) -> tuple[bool, str]:
+    """让 VLM 判断视频是不是动漫/卡通风格。
+
+    Returns (passed, reason)。passed=True 表示通过校验。
+    """
+    resolved_key = load_api_key(api_key)
+    if _is_public_url(clip_path_or_url):
+        video_url = clip_path_or_url
+    else:
+        video_url = upload_file(clip_path_or_url, expires=86400)["url"]
+
+    raw = _call_seed_video(
+        video_url=video_url,
+        system_prompt=_VERIFY_SYSTEM,
+        user_prompt=_VERIFY_USER,
+        api_key=resolved_key,
+        model=model,
+        fps=fps,
+        max_tokens=256,
+    ).strip()
+
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    verdict = (lines[0] if lines else "").upper()
+    reason  = lines[1] if len(lines) > 1 else raw[:200]
+    passed = verdict.startswith("YES")
+    return passed, reason

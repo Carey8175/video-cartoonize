@@ -92,6 +92,7 @@ cartoonize submit      → Phase 5a: 批量提交 Seedance 任务
     │
     ▼
 cartoonize poll        → Phase 5b: 查询进度（重复直到 exit 0）
+cartoonize verify      → Phase 5c: VLM 校验是否动漫风格，失败可自动重试
     │
     ▼
 cartoonize mux         → Phase 6: 下载 + 合并原始音轨
@@ -391,6 +392,54 @@ loop:
 
 Seedance 一般每个 clip 需 2–5 分钟，10 个 clip 约 10–20 分钟。  
 **poll 间隔不要小于 20s**，避免无意义的 API 调用。
+
+---
+
+### Step 5c — VLM 风格校验（最多重试 3 次）
+
+```bash
+cartoonize verify --work-dir ./my_output
+```
+
+让 VLM 看一遍 Seedance 生成的视频，判断是不是动漫/卡通风格：
+
+- **通过** → `style_verified=true`，进入下一步
+- **不通过** 且 `verify_attempts < 3` → 清除 `task_id` 和 `output_url`、status 置回 `pending`，
+  agent 重新走 `submit → poll → verify`
+- **不通过** 且 `verify_attempts = 3` → 放弃这个 clip（不会再重试）
+
+退出码：
+- **0** = 全部通过校验
+- **1** = 仍有 clip 需要重试
+
+输出：
+```json
+{
+  "status": "retry_needed",
+  "checked": 12, "passed": 10, "failed": 2, "errors": 0,
+  "retry_needed": 2,
+  "clips": [
+    {"clip_id": 3, "verdict": "fail", "reason": "...", "attempts": 1, "will_retry": true},
+    {"clip_id": 7, "verdict": "pass", "reason": "...", "attempts": 1}
+  ]
+}
+```
+
+**Agent 重试循环（必须实现）：**
+
+```
+loop:
+  # 提交新加入的待提交 clip（已 task_id 的会被 submit 跳过）
+  cartoonize submit --work-dir ./out      # 或对单个 --clip-id N
+
+  # 等所有 task 跑完
+  until cartoonize poll --work-dir ./out; do sleep 30; done
+
+  # 校验风格
+  if cartoonize verify --work-dir ./out:  # exit 0 = 全通过
+    break
+  # 否则失败的 clip 已被重置为 pending，循环回去重新 submit
+```
 
 ---
 

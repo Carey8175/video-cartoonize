@@ -57,6 +57,9 @@ def clip_to_dict(c: ClipInfo) -> dict:
         "output_path":           c.output_path,
         "status":                c.status,
         "retries":               c.retries,
+        "style_verified":        c.style_verified,
+        "verify_attempts":       c.verify_attempts,
+        "verify_reason":         c.verify_reason,
     }
 
 
@@ -72,6 +75,9 @@ def dict_to_clip(d: dict) -> ClipInfo:
     c.output_path           = d.get("output_path", "")
     c.status                = d.get("status", "pending")
     c.retries               = d.get("retries", 0)
+    c.style_verified        = d.get("style_verified", False)
+    c.verify_attempts       = d.get("verify_attempts", 0)
+    c.verify_reason         = d.get("verify_reason", "")
     return c
 
 

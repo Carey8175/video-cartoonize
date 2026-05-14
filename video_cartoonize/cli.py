@@ -433,6 +433,100 @@ def cmd_poll(args: argparse.Namespace) -> int:
     return 0 if still_running == 0 else 1
 
 
+VERIFY_MAX_ATTEMPTS = 3
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Phase 5c — VLM 校验 Seedance 输出是否为动漫风格。
+
+    对所有 status=success 且未通过校验的 clip 调用 VLM 判定。
+    通过 → style_verified=True。
+    不通过 → 清除 task_id/output_url，status 设回 pending（若 attempts<3 可重提交）。
+
+    退出码：
+      0  全部 success 的 clip 都通过校验
+      1  仍有 clip 未通过（agent 需要重跑 submit → poll → verify）
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from video_cartoonize import state as st
+    from video_cartoonize.vlm import verify_anime_style
+
+    work_dir = _work_dir(args)
+    s        = st.require(work_dir)
+    cfg      = st.cfg_from_state(s)
+    cfg.api_key = _resolve_key(cfg.api_key)
+    clips    = st.clips_from_state(s)
+
+    clip_id  = getattr(args, "clip_id", None)
+    targets  = [
+        cl for cl in clips
+        if (clip_id is None or cl.clip_id == clip_id)
+        and cl.status == "success"
+        and not cl.style_verified
+        and cl.output_url
+    ]
+
+    if not targets:
+        _out({"status": "ok", "checked": 0, "passed": 0, "failed": 0,
+              "message": "没有需要校验的 clip"})
+        return 0
+
+    def check(clip):
+        try:
+            passed, reason = verify_anime_style(clip.output_url, api_key=cfg.api_key)
+            return clip, passed, reason, None
+        except Exception as e:
+            return clip, False, "", str(e)
+
+    results: List[dict] = []
+    pass_clips, fail_clips, error_clips = [], [], []
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(check, cl) for cl in targets]
+        for f in as_completed(futures):
+            clip, passed, reason, err = f.result()
+            clip.verify_attempts += 1
+            clip.verify_reason = reason or (err or "")
+            if err:
+                error_clips.append(clip)
+                results.append({"clip_id": clip.clip_id, "verdict": "error",
+                                 "error": err, "attempts": clip.verify_attempts})
+            elif passed:
+                clip.style_verified = True
+                pass_clips.append(clip)
+                results.append({"clip_id": clip.clip_id, "verdict": "pass",
+                                 "reason": reason, "attempts": clip.verify_attempts})
+            else:
+                fail_clips.append(clip)
+                # 没到上限就清空 task_id / output_url，等待重提交
+                if clip.verify_attempts < VERIFY_MAX_ATTEMPTS:
+                    clip.task_id    = ""
+                    clip.output_url = ""
+                    clip.status     = "pending"
+                results.append({"clip_id": clip.clip_id, "verdict": "fail",
+                                 "reason": reason, "attempts": clip.verify_attempts,
+                                 "will_retry": clip.verify_attempts < VERIFY_MAX_ATTEMPTS})
+
+    # 加锁合并写回
+    with st.lock(work_dir):
+        s2 = st.require(work_dir)
+        st.merge_clips(s2, targets)
+        st.save(work_dir, s2)
+
+    retry_needed = sum(1 for cl in fail_clips if cl.verify_attempts < VERIFY_MAX_ATTEMPTS)
+    _out({
+        "status": "ok" if retry_needed == 0 else "retry_needed",
+        "checked": len(targets),
+        "passed":  len(pass_clips),
+        "failed":  len(fail_clips),
+        "errors":  len(error_clips),
+        "retry_needed": retry_needed,
+        "max_attempts": VERIFY_MAX_ATTEMPTS,
+        "clips": results,
+    })
+    return 0 if retry_needed == 0 else 1
+
+
 def cmd_mux(args: argparse.Namespace) -> int:
     """Phase 6 — 下载 Seedance 输出 + 合并原始音轨。"""
     from video_cartoonize import state as st
@@ -683,12 +777,13 @@ def build_parser() -> argparse.ArgumentParser:
     ]:
         _add_work_dir(sub.add_parser(name, help=help_text))
 
-    # cartoon / vlm / upload / submit — 支持 --clip-id 单 clip 模式
+    # cartoon / vlm / upload / submit / verify — 支持 --clip-id 单 clip 模式
     for name, help_text in [
         ("cartoon", "Phase 2b: Seedream 卡通化（--clip-id 指定单个 clip）"),
         ("vlm",     "Phase 3: VLM 场景分析（--clip-id 指定单个 clip）"),
         ("upload",  "Phase 4: TOS + Assets 上传（--clip-id 指定单个 clip）"),
         ("submit",  "Phase 5a: 提交 Seedance 任务（--clip-id 指定单个 clip）"),
+        ("verify",  "Phase 5c: VLM 校验生成视频是否动漫风格（exit 0=全通过，1=需重试）"),
     ]:
         p = sub.add_parser(name, help=help_text)
         _add_work_dir(p)
@@ -732,6 +827,7 @@ def main() -> int:
         "upload":    cmd_upload,
         "submit":    cmd_submit,
         "poll":      cmd_poll,
+        "verify":    cmd_verify,
         "mux":       cmd_mux,
         "merge":     cmd_merge,
         "status":    cmd_status,
