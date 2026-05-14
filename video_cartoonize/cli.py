@@ -512,13 +512,31 @@ def cmd_run(args: argparse.Namespace) -> int:
     import threading
     import time as _time
     from video_cartoonize.logsetup import log_clip_event
+    from video_cartoonize import state as _st
     global _SUPPRESS_OUT, _captured_out
 
     clip_id  = args.clip_id
     work_dir = _work_dir(args)
     started_at = datetime.now().isoformat(timespec="seconds")
     t0 = _time.time()
-    log_clip_event(work_dir, clip_id, "run.start")
+
+    # 读 clip 当前状态作详细启动日志
+    _s_before = _st.load(work_dir) or {}
+    _clip_before = next(
+        (c for c in _s_before.get("clips", []) if c.get("clip_id") == clip_id), {}
+    )
+    log_clip_event(
+        work_dir, clip_id, "run.start",
+        project_path=work_dir,
+        started_at=started_at,
+        resized_path=_clip_before.get("resized_path"),
+        n_keyframes_existing=len(_clip_before.get("subshot_frame_paths", [])),
+        n_cartoons_existing=len(_clip_before.get("subshot_cartoon_paths", [])),
+        n_cartoon_urls_existing=len(_clip_before.get("subshot_cartoon_urls", [])),
+        existing_task_id=_clip_before.get("task_id", ""),
+        verify_attempts=_clip_before.get("verify_attempts", 0),
+        dry_run=bool(getattr(args, "dry_run", False)),
+    )
 
     # 抑制子命令的 _out 输出，最后聚合
     _captured_out.clear()
@@ -555,9 +573,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         t_v = threading.Thread(target=_vlm)
         t_c.start(); t_v.start()
         t_c.join();  t_v.join()
-        log_clip_event(work_dir, clip_id, "run.cartoon_vlm_done",
-                       cartoon_rc=cartoon_rc[0], vlm_rc=vlm_rc[0],
-                       duration_s=round(_time.time() - t_phase_start, 1))
 
         # 汇总 cartoon 和 vlm phase（按 captured_out 顺序无法精准分，
         # 用 max(snap_c, snap_v) 之后的输出聚合）
@@ -567,6 +582,13 @@ def cmd_run(args: argparse.Namespace) -> int:
                              "summary": cartoon_out[-1] if cartoon_out else None}
         phases["vlm"]     = {"rc": vlm_rc[0],
                              "summary": vlm_out[-1] if vlm_out else None}
+
+        # 详细日志：保留完整子命令 JSON 结果
+        log_clip_event(work_dir, clip_id, "run.cartoon_vlm_done",
+                       cartoon_rc=cartoon_rc[0], vlm_rc=vlm_rc[0],
+                       duration_s=round(_time.time() - t_phase_start, 1),
+                       cartoon_result=phases["cartoon"]["summary"],
+                       vlm_result=phases["vlm"]["summary"])
 
         if cartoon_rc[0] != 0:
             err = next((o for o in _captured_out[snap_c:] if o.get("status") == "error"), None)
@@ -587,7 +609,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         t_phase_start = _time.time()
         rc = _run_phase("upload", cmd_upload)
         log_clip_event(work_dir, clip_id, "run.upload_done", rc=rc,
-                       duration_s=round(_time.time() - t_phase_start, 1))
+                       duration_s=round(_time.time() - t_phase_start, 1),
+                       result=phases["upload"]["summary"])
         if rc != 0:
             err = phases["upload"].get("summary")
             log_clip_event(work_dir, clip_id, "run.error", stage="upload", error=err)
@@ -600,7 +623,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         t_phase_start = _time.time()
         rc = _run_phase("submit", cmd_submit)
         log_clip_event(work_dir, clip_id, "run.submit_done", rc=rc,
-                       duration_s=round(_time.time() - t_phase_start, 1))
+                       duration_s=round(_time.time() - t_phase_start, 1),
+                       result=phases["submit"]["summary"])
         if rc != 0:
             err = phases["submit"].get("summary")
             log_clip_event(work_dir, clip_id, "run.error", stage="submit", error=err)
@@ -621,9 +645,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         first = submitted[0] if submitted else {}
         task_id = first.get("task_id", "")
         mode    = first.get("mode", "")
-        log_clip_event(work_dir, clip_id, "run.end",
-                       task_id=task_id, mode=mode,
-                       total_duration_s=round(_time.time() - t0, 1))
+        log_clip_event(
+            work_dir, clip_id, "run.end",
+            task_id=task_id,
+            mode=mode,
+            attempt=first.get("attempt"),
+            ratio=submit_out.get("ratio"),
+            total_duration_s=round(_time.time() - t0, 1),
+            started_at=started_at,
+            finished_at=datetime.now().isoformat(timespec="seconds"),
+            phases_summary={
+                k: {"rc": v.get("rc"), "status": v.get("status")}
+                for k, v in phases.items()
+            },
+        )
 
         _SUPPRESS_OUT = False
         _out({
@@ -692,8 +727,16 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
         clip = targets[0]
 
-        log_clip_event(work_dir, clip_id, "poll.check",
-                       task_id=clip.task_id, verify_attempts=clip.verify_attempts)
+        log_clip_event(
+            work_dir, clip_id, "poll.check",
+            task_id=clip.task_id,
+            verify_attempts=clip.verify_attempts,
+            style_verified=clip.style_verified,
+            status=clip.status,
+            output_url=clip.output_url,
+            n_cartoon_urls=len(clip.subshot_cartoon_urls),
+            attempts_history=clip.attempts,
+        )
 
         # ① 已经完成的 clip：直接报 done（含兜底/通过）
         if clip.style_verified:
@@ -729,8 +772,13 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
         # 仍在跑
         if api_status not in (STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED):
-            log_clip_event(work_dir, clip_id, "poll.running",
-                           task_id=clip.task_id, api_status=api_status)
+            log_clip_event(
+                work_dir, clip_id, "poll.running",
+                task_id=clip.task_id,
+                api_status=api_status,
+                created_at=r.get("created_at"),
+                updated_at=r.get("updated_at"),
+            )
             _out({"status": "running", "clip_id": clip.clip_id,
                   "task_id": clip.task_id, "api_status": api_status})
             return 1
@@ -744,8 +792,13 @@ def cmd_poll(args: argparse.Namespace) -> int:
                 s2 = st.require(work_dir)
                 st.merge_clip_fields(s2, clip.clip_id, status="failed")
                 st.save(work_dir, s2)
-            log_clip_event(work_dir, clip_id, "poll.seedance_failed",
-                           api_status=api_status, error=err_msg)
+            log_clip_event(
+                work_dir, clip_id, "poll.seedance_failed",
+                api_status=api_status,
+                error=err_msg,
+                task_id=clip.task_id,
+                raw_response=r,                      # 完整 API 响应
+            )
             _out({"status": "done", "clip_id": clip.clip_id,
                   "video_url": "", "seedance_status": api_status,
                   "error": err_msg, "note": "Seedance task failed (not style)"})
@@ -796,9 +849,18 @@ def cmd_poll(args: argparse.Namespace) -> int:
                                      verify_reason=reason,
                                      attempts=clip.attempts)
                 st.save(work_dir, s2)
-            log_clip_event(work_dir, clip_id, "poll.verify_pass",
-                           video_url=video_url, attempts=clip.verify_attempts,
-                           reason=reason[:200])
+            log_clip_event(
+                work_dir, clip_id, "poll.verify_pass",
+                video_url=video_url,
+                attempts=clip.verify_attempts,
+                reason=reason,                       # 完整 reason，不截断
+                task_id=clip.task_id,
+                seedance_usage=usage,
+                seedance_duration=r.get("duration"),
+                seedance_resolution=r.get("resolution"),
+                seedance_ratio=r.get("ratio"),
+                seedance_model=r.get("model"),
+            )
             _out({"status": "done", "clip_id": clip.clip_id,
                   "video_url": video_url,
                   "style_verified": True,
@@ -869,9 +931,24 @@ def cmd_poll(args: argparse.Namespace) -> int:
                                      verify_reason=reason,
                                      attempts=clip.attempts)
                 st.save(work_dir, s2)
-            log_clip_event(work_dir, clip_id, "poll.verify_fail_resubmit",
-                           attempts=clip.verify_attempts, mode=mode,
-                           new_task_id=new_task_id, reason=reason[:200])
+            log_clip_event(
+                work_dir, clip_id, "poll.verify_fail_resubmit",
+                attempts=clip.verify_attempts,
+                max_attempts=VERIFY_MAX_ATTEMPTS,
+                mode=mode,
+                use_reference_video=use_ref,
+                new_task_id=new_task_id,
+                old_task_id=clip.attempts[-1].get("task_id") if clip.attempts else "",
+                reason=reason,                       # 完整 reason
+                video_asset=vid_url,
+                n_image_assets=len(clip.subshot_cartoon_urls),
+                prompt_len=len(prompt),
+                prompt=prompt,                       # 完整 prompt
+                ratio=ratio,
+                resolution=cfg.seedance_resolution,
+                seedance_model=cfg.seedance_model,
+                last_failed_video_url=video_url,
+            )
             _out({"status": "running", "clip_id": clip.clip_id,
                   "task_id": new_task_id, "mode": mode,
                   "verify_attempts": clip.verify_attempts,
@@ -890,9 +967,14 @@ def cmd_poll(args: argparse.Namespace) -> int:
                                      verify_reason=reason,
                                      attempts=clip.attempts)
                 st.save(work_dir, s2)
-            log_clip_event(work_dir, clip_id, "poll.fallback",
-                           attempts=clip.verify_attempts, video_url=video_url,
-                           reason=reason[:200])
+            log_clip_event(
+                work_dir, clip_id, "poll.fallback",
+                attempts=clip.verify_attempts,
+                video_url=video_url,
+                reason=reason,                       # 完整 reason
+                all_attempts=clip.attempts,           # 完整历次 attempts 记录
+                note="verify exhausted, using last attempt as fallback",
+            )
             _out({"status": "done", "clip_id": clip.clip_id,
                   "video_url": video_url,
                   "style_verified": False,
@@ -1074,8 +1156,13 @@ def cmd_mux(args: argparse.Namespace) -> int:
         final_path = os.path.join(final_dir, f"clip_{clip.clip_id:02d}.mp4")
         try:
             download_url(clip.output_url, cart_path)
-            log_clip_event(work_dir, clip.clip_id, "mux.download",
-                           video_url=clip.output_url, local_path=cart_path)
+            log_clip_event(
+                work_dir, clip.clip_id, "mux.download",
+                video_url=clip.output_url,
+                local_path=cart_path,
+                file_size_bytes=os.path.getsize(cart_path) if os.path.exists(cart_path) else 0,
+                resized_path=clip.resized_path,
+            )
         except Exception as e:
             clip.status = "failed"
             log_clip_event(work_dir, clip.clip_id, "mux.error",
@@ -1085,9 +1172,14 @@ def cmd_mux(args: argparse.Namespace) -> int:
             continue
         ok = mux_original_audio(cart_path, clip.resized_path, final_path)
         clip.output_path = final_path if ok else cart_path
-        log_clip_event(work_dir, clip.clip_id,
-                       "mux.muxed" if ok else "mux.mux_failed",
-                       output=clip.output_path)
+        log_clip_event(
+            work_dir, clip.clip_id,
+            "mux.muxed" if ok else "mux.mux_failed",
+            output=clip.output_path,
+            cartoonized_path=cart_path,
+            resized_audio_source=clip.resized_path,
+            final_size_bytes=os.path.getsize(clip.output_path) if os.path.exists(clip.output_path) else 0,
+        )
         results.append({"clip_id": clip.clip_id, "status": "ok",
                          "output": clip.output_path})
 
