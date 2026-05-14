@@ -114,20 +114,68 @@ def analyse_clip(
 # ── 风格校验 ─────────────────────────────────────────────────────────────────
 
 _VERIFY_SYSTEM = (
-    "You are a strict visual style classifier. "
-    "Look at the video and decide whether it is rendered in an animated / "
-    "cartoon / anime / manga / manhwa / manhua / Pixar-3D / illustration style "
-    "(i.e. clearly NOT real-life live-action footage)."
+    "You are a strict visual style classifier."
 )
 
 _VERIFY_USER = (
-    "Answer in this exact format, nothing else:\n"
-    "LINE 1: 'YES' if the video is unambiguously animated/cartoon/anime style, "
-    "else 'NO' if it still looks like real-life footage, photorealistic CGI, "
-    "or mixed (real face + cartoon background, etc.).\n"
-    "LINE 2: one short sentence explaining the call.\n"
-    "Be strict: any real-person face = NO."
+    "Look at the video. Decide if it is rendered in an animated / cartoon / "
+    "anime / manga / manhwa / manhua / Pixar-3D / hand-drawn illustration style "
+    "(NOT real-life live-action footage or photorealistic CGI).\n\n"
+    "Output format — STRICT:\n"
+    "- The very first word of your response must be exactly YES or NO (uppercase, "
+    "no quotes, no prefix like 'LINE 1:', no markdown).\n"
+    "- After YES/NO, a newline, then one short sentence reason.\n"
+    "- Nothing else.\n\n"
+    "Rule: YES only if the ENTIRE video is unambiguously animated/cartoon. "
+    "Any real-person face, photoreal skin/hair, or real-world textures = NO."
 )
+
+
+def _parse_verify(raw: str) -> tuple[bool, str]:
+    """从 VLM 响应里抽出 YES/NO + 理由，鲁棒处理各种格式。"""
+    import re
+
+    # 去掉 markdown 包裹 / 引号 / "LINE X:" 前缀
+    cleaned = []
+    for ln in raw.splitlines():
+        ln = ln.strip().strip("*").strip("`").strip('"').strip("'")
+        ln = re.sub(r"^(line\s*\d+\s*[:.\-]|\d+\.\s*|verdict\s*[:.\-])\s*",
+                    "", ln, flags=re.IGNORECASE).strip()
+        if ln:
+            cleaned.append(ln)
+
+    flat = " ".join(cleaned).upper()
+    # 在第一行或整体里搜 YES / NO 单词
+    has_yes = bool(re.search(r"\bYES\b", flat))
+    has_no  = bool(re.search(r"\bNO\b",  flat))
+
+    # YES 和 NO 都出现时，取首个出现的（通常 verdict 在前）
+    if has_yes and has_no:
+        idx_yes = flat.find("YES")
+        idx_no  = flat.find("NO")
+        passed = idx_yes < idx_no
+    elif has_yes:
+        passed = True
+    elif has_no:
+        passed = False
+    else:
+        # 兜底语义关键词
+        animated_kw = ("ANIME", "CARTOON", "ANIMATED", "ILLUSTRAT", "MANHWA",
+                       "MANGA", "MANHUA", "PIXAR")
+        real_kw     = ("REAL-LIFE", "LIVE-ACTION", "PHOTOREAL", "REAL PERSON",
+                       "REAL FACE")
+        passed = (any(k in flat for k in animated_kw)
+                  and not any(k in flat for k in real_kw))
+
+    # 找一行最像"理由"的（既不是单独 YES/NO，也不是空）
+    reason = ""
+    for ln in cleaned:
+        if ln.upper() not in ("YES", "NO") and len(ln) > 3:
+            reason = ln
+            break
+    if not reason and cleaned:
+        reason = cleaned[-1]
+    return passed, reason[:300]
 
 
 def verify_anime_style(
@@ -158,10 +206,5 @@ def verify_anime_style(
         max_tokens=256,
         clip_id=clip_id,
         purpose="verify",
-    ).strip()
-
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-    verdict = (lines[0] if lines else "").upper()
-    reason  = lines[1] if len(lines) > 1 else raw[:200]
-    passed = verdict.startswith("YES")
-    return passed, reason
+    )
+    return _parse_verify(raw)
