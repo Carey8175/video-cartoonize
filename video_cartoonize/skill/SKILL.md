@@ -250,15 +250,14 @@ cartoonize keyframes --work-dir ./my_output
 | poll 调用频率 | 每完成一个工作流 A 调用一次；额外定期（30s）调用一次兜底 |
 | verify 并发 | 完成的 clip 立即 verify，无需限并发 |
 
-#### Agent 调度伪代码
+#### Agent 调度伪代码（简化后只用 run + poll）
 
 ```python
 N = 6
-todo         = list(range(total_clips))
-stage1       = {}                          # cid → BackgroundTask("cartoonize run --clip-id N")
-awaiting     = set()                       # 已 submit、等 poll
-verify_left  = {cid: 3 for cid in todo}
-done         = set()
+todo     = list(range(total_clips))   # 待处理
+stage1   = {}                          # cid → BackgroundTask("cartoonize run --clip-id N")
+awaiting = set()                       # 已 run 完, 等 poll 返回 done/retry
+done     = {}                          # cid → video_url
 
 while todo or stage1 or awaiting:
     # 1. 填充工作流 A（每个 clip 一行命令）
@@ -268,47 +267,58 @@ while todo or stage1 or awaiting:
             f"cartoonize run --work-dir ./out --clip-id {cid}"
         )
 
-    # 2. 收割完成的 stage 1
+    # 2. run 完成 → 进 awaiting 池
     for cid in list(stage1):
         if stage1[cid].is_done():
             del stage1[cid]
             awaiting.add(cid)
 
-    # 3. 一次性 poll + verify
-    poll = cartoonize_poll()           # 秒级返回
-    for clip in poll["clips"]:
-        cid = clip["clip_id"]
-        if cid not in awaiting:           continue
-        if clip["status"] == "success":
-            v = cartoonize_verify(clip_id=cid)
+    # 3. 一次性 poll（含 verify 集成）
+    for cid in list(awaiting):
+        res = cartoonize_poll(clip_id=cid)
+        # exit code 表达语义；res 是 stdout JSON
+        if res.exit == 0:        # done
+            done[cid] = res.json["video_url"]
             awaiting.discard(cid)
-            if v["passed"]:
-                done.add(cid)
-            elif verify_left[cid] > 0:
-                verify_left[cid] -= 1
-                todo.append(cid)            # 重新 run 一次，submit 会自动 image-only 第 3 次
-            else:
-                done.add(cid)               # 用完重试次数
-        elif clip["status"] == "failed":
+        elif res.exit == 2:      # retry：verify 不过且 < 3 次
             awaiting.discard(cid)
-            done.add(cid)
+            todo.append(cid)     # 重新 run 一次（submit 会自动 image-only 第 3 次）
+        # exit == 1: running, 留在 awaiting
 
-    # 4. 短 sleep 避免空转
     if stage1 or awaiting:
         sleep(30)
 ```
 
-**Bash 简化版：**
+> **`cartoonize poll --clip-id N` 是 agent 唯一需要的查询命令**，内部已集成：
+> - Seedance 状态查询
+> - VLM 风格校验
+> - 重试调度（清 task_id 让 agent 重 run）
+>
+> Agent **不需要直接调** `cartoonize verify`。
+
+#### Bash 极简版
 
 ```bash
-# 启动 N=6 个 run 在后台
+# 启动 6 个 clip
 for cid in 0 1 2 3 4 5; do
   cartoonize run --work-dir ./out --clip-id $cid &
 done
-# 一个完成就立刻塞下一个进来，30s 一次 poll，详见上面伪代码
+wait
+
+# poll 每个 clip 直到 done/retry，retry 自动重 run
+for cid in 0 1 2 3 4 5; do
+  while true; do
+    cartoonize poll --work-dir ./out --clip-id $cid
+    case $? in
+      0) break ;;                                              # done
+      2) cartoonize run --work-dir ./out --clip-id $cid ;;     # retry
+      *) sleep 30 ;;                                           # running
+    esac
+  done
+done
 ```
 
-> **关键点：** `cartoonize run --clip-id N` 是 agent 调度的**唯一**主命令。它内部已经处理好 cartoon/vlm/upload/submit 的并行+串行依赖，返回 `{task_id, mode}` 给 agent。
+> **`cartoonize run --clip-id N` 是 agent 调度的主命令**：内部并行 cartoon+vlm、串行 upload→submit，返回 `{task_id, mode}`。
 
 #### ⚠️ 反面案例
 

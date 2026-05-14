@@ -614,19 +614,36 @@ def cmd_run(args: argparse.Namespace) -> int:
         _captured_out.clear()
 
 
+VERIFY_MAX_ATTEMPTS = 3
+
+
 def cmd_poll(args: argparse.Namespace) -> int:
-    """Phase 5b — 查询任务状态（一次性，不阻塞）。
+    """Phase 5b/5c 一站式 — 查询 Seedance + 自动 VLM 风格校验 + 自动重试调度。
 
-    --clip-id N: 只查指定 clip（per-clip 流水线用）
-    无 --clip-id: 查所有 clip（全量模式）
+    单 clip 模式 (--clip-id N) 是 agent 唯一需要的查询命令：
 
-    退出码:
-      0  指定范围内全部已终结（success 或 failed）
-      1  仍有任务运行中
+        cartoonize run --clip-id N    # 启动
+        while True:
+            res = cartoonize poll --clip-id N
+            case exit code:
+                0 = done       → 拿 res.video_url 接 mux/merge
+                1 = running    → sleep 30s 再 poll
+                2 = retry      → cartoonize run --clip-id N 重做一次
+
+    内部:
+        1. 查 Seedance 状态
+        2. 若 SUCCEEDED → 自动 verify_anime_style
+            pass → status=done, style_verified=true
+            fail 且 attempts < 3 → 清 task_id, status=retry（agent 重 run）
+            fail 且 attempts >= 3 → status=done, style_verified=false（用兜底视频）
+        3. 若 FAILED/CANCELLED → status=done, error=...
+
+    无 --clip-id (全量模式): 仅查询不 verify（向后兼容旧调用）。
     """
     from video_cartoonize import state as st
     from video_cartoonize.core import poll_task
     from video_cartoonize.ark_client import STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED
+    from video_cartoonize.vlm import verify_anime_style
 
     work_dir = _work_dir(args)
     s        = st.require(work_dir)
@@ -637,6 +654,158 @@ def cmd_poll(args: argparse.Namespace) -> int:
     clip_id  = getattr(args, "clip_id", None)
     targets  = [cl for cl in clips if clip_id is None or cl.clip_id == clip_id]
 
+    # ── 单 clip 模式: agent 主入口，含 verify 集成 ──────────────────
+    if clip_id is not None:
+        if not targets:
+            _out({"status": "error", "error_type": "ClipNotFound",
+                  "clip_id": clip_id})
+            return 1
+
+        clip = targets[0]
+
+        # ① 已经完成的 clip：直接报 done（含兜底/通过）
+        if clip.style_verified:
+            _out({"status": "done", "clip_id": clip.clip_id,
+                  "video_url": clip.output_url,
+                  "style_verified": True,
+                  "verify_attempts": clip.verify_attempts})
+            return 0
+        if clip.verify_attempts >= VERIFY_MAX_ATTEMPTS and clip.output_url:
+            _out({"status": "done", "clip_id": clip.clip_id,
+                  "video_url": clip.output_url,
+                  "style_verified": False,
+                  "verify_attempts": clip.verify_attempts,
+                  "note": "verify exhausted, using fallback"})
+            return 0
+
+        # ② 没 task_id 说明还没 submit/run（pending）→ 让 agent 重 run
+        if not clip.task_id:
+            _out({"status": "retry", "clip_id": clip.clip_id,
+                  "reason": "no task_id — clip 还没 submit，请先调 cartoonize run --clip-id N",
+                  "verify_attempts": clip.verify_attempts})
+            return 2
+
+        # ③ poll Seedance
+        try:
+            r = poll_task(cfg.api_key, clip.task_id)
+        except Exception as e:
+            _out({"status": "running", "clip_id": clip.clip_id,
+                  "task_id": clip.task_id, "poll_error": str(e)})
+            return 1
+
+        api_status = r.get("status", "")
+
+        # 仍在跑
+        if api_status not in (STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED):
+            _out({"status": "running", "clip_id": clip.clip_id,
+                  "task_id": clip.task_id, "api_status": api_status})
+            return 1
+
+        # Seedance 自己失败（API 错误，不是风格问题）
+        if api_status in (STATUS_FAILED, STATUS_CANCELLED):
+            err = r.get("error") or {}
+            err_msg = err.get("message", "") if isinstance(err, dict) else str(err)
+            clip.status = "failed"
+            with st.lock(work_dir):
+                s2 = st.require(work_dir)
+                st.merge_clip_fields(s2, clip.clip_id, status="failed")
+                st.save(work_dir, s2)
+            _out({"status": "done", "clip_id": clip.clip_id,
+                  "video_url": "", "seedance_status": api_status,
+                  "error": err_msg, "note": "Seedance task failed (not style)"})
+            return 0
+
+        # Seedance 成功 → 拿 video_url 并记账
+        video_url = (r.get("content") or {}).get("video_url", "")
+        clip.output_url = video_url
+        clip.status     = "success"
+        from video_cartoonize import billing as _bl
+        usage = r.get("usage") or {}
+        _bl.record(
+            "seedance",
+            clip_id=clip.clip_id,
+            model=r.get("model", ""),
+            duration_s=int(r.get("duration", 0) or 0),
+            resolution=r.get("resolution", ""),
+            ratio=r.get("ratio", ""),
+            task_id=clip.task_id,
+            completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+            total_tokens=int(usage.get("total_tokens", 0) or 0),
+        )
+
+        # ④ 自动 VLM 风格校验
+        try:
+            passed, reason = verify_anime_style(video_url, api_key=cfg.api_key,
+                                                clip_id=clip.clip_id)
+        except Exception as e:
+            passed, reason = False, f"verify error: {e}"
+
+        clip.verify_attempts += 1
+        clip.verify_reason   = reason
+        clip.attempts.append({
+            "task_id":    clip.task_id,
+            "output_url": video_url,
+            "verdict":    "pass" if passed else "fail",
+            "reason":     reason,
+        })
+
+        if passed:
+            clip.style_verified = True
+            with st.lock(work_dir):
+                s2 = st.require(work_dir)
+                st.merge_clip_fields(s2, clip.clip_id,
+                                     output_url=video_url, status="success",
+                                     style_verified=True,
+                                     verify_attempts=clip.verify_attempts,
+                                     verify_reason=reason,
+                                     attempts=clip.attempts)
+                st.save(work_dir, s2)
+            _out({"status": "done", "clip_id": clip.clip_id,
+                  "video_url": video_url,
+                  "style_verified": True,
+                  "verify_attempts": clip.verify_attempts,
+                  "reason": reason})
+            return 0
+
+        # verify 失败
+        if clip.verify_attempts < VERIFY_MAX_ATTEMPTS:
+            # 还能重试：清 task_id 让 agent 重 run（output_url 保留作兜底）
+            with st.lock(work_dir):
+                s2 = st.require(work_dir)
+                st.merge_clip_fields(s2, clip.clip_id,
+                                     task_id="", status="pending",
+                                     output_url=video_url,  # 保留作兜底
+                                     style_verified=False,
+                                     verify_attempts=clip.verify_attempts,
+                                     verify_reason=reason,
+                                     attempts=clip.attempts)
+                st.save(work_dir, s2)
+            _out({"status": "retry", "clip_id": clip.clip_id,
+                  "verify_attempts": clip.verify_attempts,
+                  "max_attempts": VERIFY_MAX_ATTEMPTS,
+                  "reason": reason,
+                  "next_step": f"cartoonize run --clip-id {clip.clip_id}"})
+            return 2
+        else:
+            # 用完 3 次：用兜底视频
+            with st.lock(work_dir):
+                s2 = st.require(work_dir)
+                st.merge_clip_fields(s2, clip.clip_id,
+                                     output_url=video_url, status="success",
+                                     style_verified=False,
+                                     verify_attempts=clip.verify_attempts,
+                                     verify_reason=reason,
+                                     attempts=clip.attempts)
+                st.save(work_dir, s2)
+            _out({"status": "done", "clip_id": clip.clip_id,
+                  "video_url": video_url,
+                  "style_verified": False,
+                  "verify_attempts": clip.verify_attempts,
+                  "note": "verify exhausted, using last attempt as fallback",
+                  "reason": reason})
+            return 0
+
+    # ── 全量模式 (无 --clip-id): 旧行为，只查不 verify ───────────────
     results = []
     still_running = 0
 
@@ -658,22 +827,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
         if api_status == STATUS_SUCCEEDED:
             clip.output_url = (r.get("content") or {}).get("video_url", "")
             clip.status     = "success"
-            # 记账（在 success 时拿到真实 usage tokens）
-            from video_cartoonize import billing as _bl
-            usage = r.get("usage") or {}
-            _bl.record(
-                "seedance",
-                clip_id=clip.clip_id,
-                model=r.get("model", ""),
-                duration_s=int(r.get("duration", 0) or 0),
-                resolution=r.get("resolution", ""),
-                ratio=r.get("ratio", ""),
-                task_id=clip.task_id,
-                completion_tokens=int(usage.get("completion_tokens", 0) or 0),
-                total_tokens=int(usage.get("total_tokens", 0) or 0),
-            )
         elif api_status in (STATUS_FAILED, STATUS_CANCELLED):
-            err = r.get("error") or {}
             clip.status = "failed"
         else:
             still_running += 1
@@ -681,16 +835,18 @@ def cmd_poll(args: argparse.Namespace) -> int:
         results.append({"clip_id": clip.clip_id, "status": clip.status,
                          "api_status": api_status, "task_id": clip.task_id})
 
-    st.clips_to_state(s, clips)
-    st.save(work_dir, s)
+    # 加锁字段级合并（避免覆盖其他进程写的字段）
+    with st.lock(work_dir):
+        s2 = st.require(work_dir)
+        for clip in targets:
+            st.merge_clip_fields(s2, clip.clip_id,
+                                 output_url=clip.output_url, status=clip.status)
+        st.save(work_dir, s2)
 
     _out({"status": "ok" if still_running == 0 else "running",
           "still_running": still_running,
           "clips": results})
     return 0 if still_running == 0 else 1
-
-
-VERIFY_MAX_ATTEMPTS = 3
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
