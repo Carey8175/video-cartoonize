@@ -386,6 +386,10 @@ def update_asset_group(
 
 # --- Asset operations -----------------------------------------------------------
 
+# 默认跳过审核：本项目素材均来自受信源（TOS 私有 bucket 上传），不需要审核
+_DEFAULT_MODERATION: dict[str, Any] = {"Strategy": "Skip"}
+
+
 def create_asset(
     group_id: str,
     url: str,
@@ -393,6 +397,7 @@ def create_asset(
     asset_type: str = ASSET_TYPE_IMAGE,
     name: str = "",
     project_name: str = DEFAULT_PROJECT,
+    moderation: dict[str, Any] | None = None,
     **kw: Any,
 ) -> str:
     """Create an asset. Returns asset_id (initial status = Processing).
@@ -402,7 +407,14 @@ def create_asset(
 
     To use the asset for generation, you must first wait until status = Active.
     Use `upload_and_wait()` to do create + poll in one call.
+
+    `moderation`: dict 控制审核策略。
+      - 默认 {"Strategy": "Skip"}：跳过审核（适合受信任素材库）
+      - 显式传 None 时也使用默认 Skip
+      - 传 {} 可关闭（让 API 走默认审核流程）
     """
+    if moderation is None:
+        moderation = _DEFAULT_MODERATION
     payload = {
         "GroupId": group_id,
         "URL": url,
@@ -410,6 +422,9 @@ def create_asset(
         "Name": name,
         "ProjectName": project_name,
     }
+    if moderation:
+        payload["Moderation"] = moderation
+    print(f"[DEBUG CreateAsset payload] {payload}", flush=True)
     resp = _call("CreateAsset", payload, **kw)
     result = resp.get("Result") or {}
     aid = result.get("Id") or result.get("AssetId")
