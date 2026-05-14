@@ -1,4 +1,7 @@
-"""项目级别用量记账：Seedream / VLM / Seedance 每次 API 调用都追加一行 JSONL。
+"""项目级别用量记账 + 成本换算 (USD)。
+
+每次 API 调用都追加一行 JSONL；汇总时按官方价目表换算成 USD。
+价格可在 ~/.config/video-cartoonize/prices.json 覆盖默认值。
 
 设计：
 - 每个 work_dir 下一个 billing.jsonl（append-only，并发安全）
@@ -17,6 +20,36 @@ BILLING_FILE = "billing.jsonl"
 
 # 当前项目的工作目录（CLI 入口设置）
 _current_project: Optional[str] = None
+
+
+# ── 价目表 (USD per 1M tokens) ────────────────────────────────────────────
+# 仅供成本估算参考，请按合同实际价格更新 ~/.config/video-cartoonize/prices.json
+DEFAULT_PRICES_USD_PER_M_TOKENS: dict = {
+    "seedream-5-0-260128":           30.0,   # Seedream 5.0 图片生成
+    "seed-2-0-lite-260228":           1.0,   # Seed 2.0 Lite VLM 视频分析
+    "dreamina-seedance-2-0-260128":  50.0,   # Seedance 2.0 standard
+    "dreamina-seedance-2-0-fast-260128": 25.0,  # Seedance 2.0 fast
+}
+
+
+def load_prices() -> dict:
+    """Load USD prices from config dir or fall back to defaults."""
+    try:
+        from video_cartoonize.settings import CONFIG_DIR
+        f = CONFIG_DIR / "prices.json"
+        if f.exists():
+            return {**DEFAULT_PRICES_USD_PER_M_TOKENS,
+                    **json.loads(f.read_text(encoding="utf-8"))}
+    except Exception:
+        pass
+    return dict(DEFAULT_PRICES_USD_PER_M_TOKENS)
+
+
+def cost_usd(model: str, tokens: int, prices: Optional[dict] = None) -> float:
+    """单一调用的成本（USD）。"""
+    prices = prices or load_prices()
+    rate = prices.get(model, 0.0)
+    return round(rate * tokens / 1_000_000, 6)
 
 
 def set_project(work_dir: Optional[str]) -> None:
@@ -130,5 +163,35 @@ def summarize(work_dir: str) -> dict:
     grand_total = (totals["seedream"]["total_tokens"]
                    + totals["vlm"]["total_tokens"]
                    + totals["seedance"]["total_tokens"])
+
+    # 按各服务的 model 分布换算 USD（model 用量乘以单价）
+    prices = load_prices()
+
+    def _service_cost(t: dict) -> float:
+        # t["models"] = {"model_id": call_count, ...}
+        # 但我们不知道每个 model 各自的 token 数。简化：以服务总 token / 总 call 比例分摊
+        if t["total_tokens"] == 0:
+            return 0.0
+        if not t["models"]:
+            return 0.0
+        # 按 calls 数比例分摊到不同 model 上
+        total_calls = sum(t["models"].values()) or 1
+        cost = 0.0
+        for model, calls in t["models"].items():
+            share = calls / total_calls
+            cost += cost_usd(model, int(t["total_tokens"] * share), prices)
+        return round(cost, 4)
+
+    sdr_cost = _service_cost(totals["seedream"])
+    vlm_cost = _service_cost(totals["vlm"])
+    sdn_cost = _service_cost(totals["seedance"])
+    grand_usd = round(sdr_cost + vlm_cost + sdn_cost, 4)
+
+    totals["seedream"]["cost_usd"] = sdr_cost
+    totals["vlm"]["cost_usd"]      = vlm_cost
+    totals["seedance"]["cost_usd"] = sdn_cost
+
     return {"totals": totals, "records": records, "by_clip": by_clip,
-            "grand_total_tokens": grand_total}
+            "grand_total_tokens": grand_total,
+            "grand_total_usd": grand_usd,
+            "prices_used": prices}

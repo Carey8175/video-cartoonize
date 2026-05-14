@@ -367,9 +367,12 @@ def cmd_submit(args: argparse.Namespace) -> int:
     style = get_style(s["config"]["style_id"])
     preamble = build_preamble(style.description)
 
+    dry_run = bool(getattr(args, "dry_run", False))
+
     submitted = []
+    preview   = []   # dry-run 时填充
     for clip in targets:
-        if clip.task_id:  # 已提交过，跳过
+        if clip.task_id and not dry_run:  # 已提交过，跳过（dry-run 时显示完整 prompt）
             submitted.append({"clip_id": clip.clip_id, "task_id": clip.task_id, "skipped": True})
             continue
         vid_url = clip_asset_urls.get(clip.clip_id, "")
@@ -396,6 +399,21 @@ def cmd_submit(args: argparse.Namespace) -> int:
         else:
             prompt = base_prompt
 
+        if dry_run:
+            preview.append({
+                "clip_id":         clip.clip_id,
+                "mode":            mode,
+                "use_ref_video":   use_ref_video,
+                "video_asset":     vid_url if use_ref_video else None,
+                "n_images":        len(clip.subshot_cartoon_urls),
+                "ratio":           ratio,
+                "resolution":      cfg.seedance_resolution,
+                "model":           cfg.seedance_model,
+                "prompt_chars":    len(prompt),
+                "prompt_preview":  prompt[:500] + ("..." if len(prompt) > 500 else ""),
+            })
+            continue
+
         task_id = submit_clip(cfg.api_key, clip, vid_url, prompt, ratio, cfg,
                               use_reference_video=use_ref_video)
         if task_id:
@@ -404,6 +422,11 @@ def cmd_submit(args: argparse.Namespace) -> int:
                               "attempt": clip.verify_attempts + 1, "mode": mode})
         else:
             clip.status = "failed"
+
+    if dry_run:
+        _out({"status": "dry_run", "ratio": ratio, "preview": preview,
+              "note": "no Seedance task was actually submitted"})
+        return 0
 
     # 加锁，重读 + 增量合并（并发安全）
     with st.lock(work_dir):
@@ -764,12 +787,14 @@ def cmd_billing(args: argparse.Namespace) -> int:
     print(f"工作目录: {work_dir}")
     print(f"总记录数: {summary['records']}")
     print(f"总 token 数: {summary.get('grand_total_tokens', 0):,}")
+    print(f"总成本估算: ${summary.get('grand_total_usd', 0):.4f} USD "
+          f"(按默认价目表，可在 ~/.config/video-cartoonize/prices.json 覆盖)")
     print()
     print("Seedream (图片生成)")
     print(f"  调用次数:        {sd['calls']}")
     print(f"  生成图片数:      {sd['images']}")
-    print(f"  output_tokens:   {sd['output_tokens']:>10,}")
     print(f"  total_tokens:    {sd['total_tokens']:>10,}")
+    print(f"  成本:            ${sd.get('cost_usd', 0):>9.4f}")
     if sd['models']:
         print(f"  模型:            {sd['models']}")
     print()
@@ -778,14 +803,15 @@ def cmd_billing(args: argparse.Namespace) -> int:
     print(f"  prompt_tokens:   {v['prompt_tokens']:>10,}")
     print(f"  completion_tok:  {v['completion_tokens']:>10,}")
     print(f"  total_tokens:    {v['total_tokens']:>10,}")
+    print(f"  成本:            ${v.get('cost_usd', 0):>9.4f}")
     if v['models']:
         print(f"  模型:            {v['models']}")
     print()
     print("Seedance (视频生成)")
     print(f"  succeeded:       {dn['calls']}")
     print(f"  累计输出秒数:    {dn['duration_seconds']} s")
-    print(f"  completion_tok:  {dn['completion_tokens']:>10,}")
     print(f"  total_tokens:    {dn['total_tokens']:>10,}")
+    print(f"  成本:            ${dn.get('cost_usd', 0):>9.4f}")
     if dn['models']:
         print(f"  模型:            {dn['models']}")
 
@@ -798,6 +824,71 @@ def cmd_billing(args: argparse.Namespace) -> int:
                   f"sdr={bc['seedream_calls']}/{bc['seedream_tokens']}tok  "
                   f"vlm={bc['vlm_calls']}/{bc['vlm_tokens']}tok  "
                   f"sdn={bc['seedance_calls']}/{bc['seedance_duration_s']}s/{bc['seedance_tokens']}tok")
+    return 0
+
+
+def cmd_estimate(args: argparse.Namespace) -> int:
+    """基于现有用量预估整个项目的成本（含未完成 clip 的预期成本）。
+
+    思路:
+    - 已完成的部分：直接从 billing.jsonl 读真实 token
+    - 未完成的部分：用已完成 clip 的平均值估算
+      估算公式: 剩余 clip 数 × (已完成 clip 平均成本)
+    """
+    from video_cartoonize import state as st, billing as bl
+
+    work_dir = _work_dir(args)
+    s        = st.require(work_dir)
+    summary  = bl.summarize(work_dir)
+    clips    = s.get("clips", [])
+
+    total_clips     = len(clips)
+    submitted_clips = sum(1 for c in clips if c.get("task_id"))
+    done_clips      = sum(1 for c in clips if c.get("status") == "success")
+    by_clip         = summary.get("by_clip", {})
+    completed_with_billing = len(by_clip)
+
+    actual_usd = summary.get("grand_total_usd", 0.0)
+
+    # 估算剩余 clip 的预期成本 = 已完成 clip 的平均 USD
+    avg_per_clip_usd = 0.0
+    if completed_with_billing > 0:
+        # 用每个 clip 自己的 token + 价目表换算
+        prices = bl.load_prices()
+        # 简化：用 grand_total / completed_with_billing
+        avg_per_clip_usd = actual_usd / completed_with_billing if completed_with_billing else 0.0
+
+    remaining_clips = total_clips - completed_with_billing
+    projected_remaining_usd = round(remaining_clips * avg_per_clip_usd, 4)
+    projected_total_usd = round(actual_usd + projected_remaining_usd, 4)
+
+    if getattr(args, "json", False):
+        _out({
+            "actual_usd":          round(actual_usd, 4),
+            "projected_total_usd": projected_total_usd,
+            "projected_remaining_usd": projected_remaining_usd,
+            "avg_per_clip_usd":    round(avg_per_clip_usd, 4),
+            "total_clips":         total_clips,
+            "done_clips":          done_clips,
+            "submitted_clips":     submitted_clips,
+            "completed_with_billing": completed_with_billing,
+        })
+        return 0
+
+    print(f"工作目录: {work_dir}")
+    print(f"总 clip 数:         {total_clips}")
+    print(f"已提交:             {submitted_clips}")
+    print(f"已成功:             {done_clips}")
+    print(f"已有 billing 记录:  {completed_with_billing}")
+    print()
+    print(f"已发生成本（基于真实 token）:     ${actual_usd:>9.4f} USD")
+    if avg_per_clip_usd > 0:
+        print(f"每个 clip 平均成本:               ${avg_per_clip_usd:>9.4f} USD")
+        print(f"预计剩余成本（{remaining_clips} clip × 平均）: ${projected_remaining_usd:>9.4f} USD")
+        print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print(f"项目总成本估算:                   ${projected_total_usd:>9.4f} USD")
+    else:
+        print("（尚无 billing 记录，无法估算）")
     return 0
 
 
@@ -926,6 +1017,9 @@ def build_parser() -> argparse.ArgumentParser:
         _add_work_dir(p)
         p.add_argument("--clip-id", type=int, default=None, metavar="N",
                        help="只处理指定 clip（不填则处理全部）")
+        if name == "submit":
+            p.add_argument("--dry-run", action="store_true",
+                           help="只显示将提交的 prompt 和参数，不实际调用 Seedance")
 
     # poll
     p = sub.add_parser("poll", help="Phase 5b: 查询 Seedance 任务状态（exit 0=完成，1=仍运行中）")
@@ -951,10 +1045,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("version", help="显示版本信息")
 
     # billing
-    p = sub.add_parser("billing", help="显示项目 Seedream/VLM/Seedance 用量汇总")
+    p = sub.add_parser("billing", help="显示项目 Seedream/VLM/Seedance 用量汇总（含 USD 成本）")
     _add_work_dir(p)
     p.add_argument("--by-clip", action="store_true", help="同时显示每个 clip 的明细")
-    p.add_argument("--json",    action="store_true", help="输出原始 JSON（而非格式化文本）")
+    p.add_argument("--json", action="store_true", help="输出原始 JSON（而非格式化文本）")
+
+    # estimate
+    p = sub.add_parser("estimate", help="基于已发生的成本预估项目总成本")
+    _add_work_dir(p)
+    p.add_argument("--json", action="store_true", help="输出原始 JSON")
 
     return root
 
@@ -990,6 +1089,7 @@ def main() -> int:
         "install-skill": cmd_install_skill,
         "version":       cmd_version,
         "billing":       cmd_billing,
+        "estimate":      cmd_estimate,
     }
 
     if args.cmd == "styles":
