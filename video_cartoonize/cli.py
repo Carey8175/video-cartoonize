@@ -90,8 +90,9 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     seedance_model = _resolve_seedance_model(getattr(args, "seedance_model", "standard"))
 
+    from video_cartoonize.state import CURRENT_SCHEMA_VERSION
     s = {
-        "version":    1,
+        "version":    CURRENT_SCHEMA_VERSION,
         "work_dir":   work_dir,
         "input_video": input_video,
         "started_at": datetime.now().isoformat(),
