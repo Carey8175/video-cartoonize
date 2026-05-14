@@ -22,3 +22,15 @@ ark_api_key.txt
 ark_ak_sk.json
 tos_credentials.json
 *_credentials.json
+
+# Claude Code 本地工作目录
+.claude/
+
+# 测试 / 调试产物（脚本保留，结果数据/视频不入库）
+tests/*.html
+tests/*.json
+tests/clip_*_failures/
+tests/__pycache__/
+
+# 本地下载的源视频
+downloads/

@@ -98,16 +98,32 @@ def _request_json(
         json.dumps(payload).encode("utf-8") if payload is not None else None
     )
     req = request.Request(url, data=body_bytes, headers=headers, method=method)
+
+    # 把实际 HTTP 调用包进 retry 装饰器（指数退避）
+    from video_cartoonize.errors import APIError
+    from video_cartoonize.retry import with_retry
+
+    @with_retry(max_attempts=3, base_delay=1.0, max_delay=15.0)
+    def _do_request() -> str:
+        try:
+            with request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8")
+        except error.HTTPError as exc:
+            err_body = exc.read().decode("utf-8", errors="ignore")
+            retryable = exc.code in (408, 429, 500, 502, 503, 504)
+            raise APIError(
+                f"{label} failed [HTTP {exc.code}]: {err_body[:200]}",
+                service="ark", status=exc.code, retryable=retryable,
+            ) from exc
+        except Exception as exc:
+            raise APIError(
+                f"{label} failed: {exc}", service="ark", retryable=True,
+            ) from exc
+
     try:
-        with request.urlopen(req, timeout=timeout) as resp:
-            response_body = resp.read().decode("utf-8")
-    except error.HTTPError as exc:
-        err_body = exc.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(
-            f"{label} failed [HTTP {exc.code}]: {err_body}"
-        ) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"{label} failed: {exc}") from exc
+        response_body = _do_request()
+    except APIError:
+        raise
 
     if not response_body:
         return {}

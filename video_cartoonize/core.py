@@ -23,7 +23,7 @@ def _ffprobe_duration(path: str) -> Optional[float]:
         out = subprocess.check_output(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "default=nw=1:nk=1", path],
-            text=True,
+            text=True, timeout=30,
         ).strip()
         return float(out) if out else None
     except Exception:
@@ -78,7 +78,7 @@ def build_image_order_hint(n_keyframes: int) -> str:
 def detect_ratio(video_path: str) -> str:
     cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
            "-show_entries", "stream=width,height", "-of", "json", video_path]
-    out = subprocess.check_output(cmd, text=True)
+    out = subprocess.check_output(cmd, text=True, timeout=30)
     stream = json.loads(out)["streams"][0]
     w, h = int(stream["width"]), int(stream["height"])
     actual = w / h
@@ -127,9 +127,9 @@ def mux_original_audio(cartoon_path: str, original_path: str, out_path: str) -> 
                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
                out_path]
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, timeout=120)
         return True
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         print(f"[mux] {os.path.basename(out_path)} ✗ {e}")
         return False
 

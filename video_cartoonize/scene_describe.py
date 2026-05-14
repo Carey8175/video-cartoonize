@@ -78,7 +78,7 @@ def _extract_last_frame(clip_path: str, out_dir: str, clip_id: int) -> Optional[
     cmd_dur = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                "-of", "default=nw=1:nk=1", clip_path]
     try:
-        dur = float(subprocess.check_output(cmd_dur, text=True).strip())
+        dur = float(subprocess.check_output(cmd_dur, text=True, timeout=30).strip())
     except Exception:
         return None
 
@@ -89,9 +89,9 @@ def _extract_last_frame(clip_path: str, out_dir: str, clip_id: int) -> Optional[
            "-ss", f"{seek:.3f}",
            "-frames:v", "1", "-update", "1", dst]
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, timeout=60)
         return dst if os.path.exists(dst) and os.path.getsize(dst) > 0 else None
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
 
 
@@ -99,7 +99,7 @@ def _get_duration(clip_path: str) -> float:
     cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
            "-of", "default=nw=1:nk=1", clip_path]
     try:
-        return float(subprocess.check_output(cmd, text=True).strip())
+        return float(subprocess.check_output(cmd, text=True, timeout=30).strip())
     except Exception:
         return 0.0
 

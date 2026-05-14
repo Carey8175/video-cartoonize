@@ -50,8 +50,8 @@ def extract_sub_shot_keyframes(
                "-ss", f"{seek:.3f}", "-i", clip_path,
                "-frames:v", "1", "-update", "1", dst]
         try:
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, timeout=60)
             out.append((t, dst))
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             print(f"[sub_shot] ✗ failed at t={t}: {e}")
     return out

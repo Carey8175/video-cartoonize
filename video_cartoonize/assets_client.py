@@ -275,16 +275,27 @@ def _call(
     url = f"https://{host}/?{_canonical_query_string(query)}"
     req = request.Request(url, data=body, headers=headers, method="POST")
 
-    try:
-        with request.urlopen(req, timeout=timeout) as resp:
-            response_body = resp.read().decode("utf-8")
-    except error.HTTPError as exc:
-        err_body = exc.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(
-            f"{action} failed [HTTP {exc.code}]: {err_body}"
-        ) from exc
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"{action} failed: {exc}") from exc
+    from video_cartoonize.errors import APIError
+    from video_cartoonize.retry import with_retry
+
+    @with_retry(max_attempts=3, base_delay=1.0, max_delay=15.0)
+    def _do_request() -> str:
+        try:
+            with request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8")
+        except error.HTTPError as exc:
+            err_body = exc.read().decode("utf-8", errors="ignore")
+            retryable = exc.code in (408, 429, 500, 502, 503, 504)
+            raise APIError(
+                f"{action} failed [HTTP {exc.code}]: {err_body[:200]}",
+                service="assets", status=exc.code, retryable=retryable,
+            ) from exc
+        except Exception as exc:
+            raise APIError(
+                f"{action} failed: {exc}", service="assets", retryable=True,
+            ) from exc
+
+    response_body = _do_request()
 
     if not response_body:
         return {}

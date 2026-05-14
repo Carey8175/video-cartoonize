@@ -31,7 +31,7 @@ def _ffprobe_duration(path: str) -> Optional[float]:
     cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
            "-of", "default=nw=1:nk=1", path]
     try:
-        proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        proc = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30)
         return float((proc.stdout or "").strip())
     except Exception:
         return None
@@ -41,7 +41,7 @@ def _ffprobe_has_video(path: str) -> bool:
     cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
            "-show_entries", "stream=width,height", "-of", "json", path]
     try:
-        proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        proc = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30)
         streams = json.loads(proc.stdout or "{}").get("streams", [])
         return bool(streams) and int(streams[0].get("width", 0)) > 0
     except Exception:
@@ -57,7 +57,7 @@ def _split_one_ffmpeg(src: str, start: float, dur: float, dst: str, reencode: bo
                  "-movflags", "+faststart", "-avoid_negative_ts", "make_zero"]
     else:
         extra = ["-map", "0", "-c", "copy", "-avoid_negative_ts", "make_zero"]
-    subprocess.run(base + extra + [dst], check=True)
+    subprocess.run(base + extra + [dst], check=True, timeout=300)
 
 
 def _split_clips_ffmpeg(src: str, clips: list, out_dir: str, video_name: str) -> None:
@@ -148,14 +148,14 @@ def resize_video(src: str, dst: str, limit: int) -> None:
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-i", src, "-vf", vf, "-c:v", "libx264", "-pix_fmt", "yuv420p",
            "-crf", "18", "-preset", "medium", "-c:a", "copy", dst]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, timeout=300)
 
 
 def _ffprobe_sig(path: str) -> dict:
     cmd = ["ffprobe", "-v", "error", "-show_entries",
            "stream=codec_type,codec_name,width,height,pix_fmt,avg_frame_rate,sample_rate,channels",
            "-of", "json", path]
-    data = json.loads(subprocess.run(cmd, check=True, capture_output=True, text=True).stdout or "{}")
+    data = json.loads(subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30).stdout or "{}")
     sig = {"video": None, "audio": None}
     for s in data.get("streams", []):
         t = s.get("codec_type")
@@ -187,7 +187,7 @@ def merge_clips(
         subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
              "-i", clip_paths[0], "-c", "copy", "-movflags", "+faststart", output_path],
-            check=True,
+            check=True, timeout=300,
         )
         print(f"[Merge] → {output_path}")
         return
@@ -223,7 +223,7 @@ def merge_clips(
         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
         output_path,
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, timeout=600)   # merge 整片可能多个 clip 时间较长
     print(f"[Merge] → {output_path}  (audio crossfade {audio_crossfade}s)")
 
 
@@ -244,7 +244,7 @@ def _merge_clips_concat(clip_paths: List[str], output_path: str) -> None:
         else:
             extra = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "medium",
                      "-crf", "18", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
-        subprocess.run(base_cmd + extra + [output_path], check=True)
+        subprocess.run(base_cmd + extra + [output_path], check=True, timeout=600)
         print(f"[Merge] → {output_path}")
     finally:
         try:
