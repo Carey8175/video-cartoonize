@@ -379,10 +379,13 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
 
 def cmd_poll(args: argparse.Namespace) -> int:
-    """Phase 5b — 查询所有任务状态（一次性，不阻塞）。
+    """Phase 5b — 查询任务状态（一次性，不阻塞）。
+
+    --clip-id N: 只查指定 clip（per-clip 流水线用）
+    无 --clip-id: 查所有 clip（全量模式）
 
     退出码:
-      0  全部已终结（success 或 failed）
+      0  指定范围内全部已终结（success 或 failed）
       1  仍有任务运行中
     """
     from video_cartoonize import state as st
@@ -395,10 +398,13 @@ def cmd_poll(args: argparse.Namespace) -> int:
     cfg.api_key = _resolve_key(cfg.api_key)
     clips    = st.clips_from_state(s)
 
+    clip_id  = getattr(args, "clip_id", None)
+    targets  = [cl for cl in clips if clip_id is None or cl.clip_id == clip_id]
+
     results = []
     still_running = 0
 
-    for clip in clips:
+    for clip in targets:
         if not clip.task_id or clip.status in ("success", "failed"):
             results.append({"clip_id": clip.clip_id,
                              "status": clip.status,
@@ -873,8 +879,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="只处理指定 clip（不填则处理全部）")
 
     # poll
-    p = sub.add_parser("poll", help="Phase 5b: 查询 Seedance 任务状态（exit 0=全完成，1=仍运行中）")
+    p = sub.add_parser("poll", help="Phase 5b: 查询 Seedance 任务状态（exit 0=完成，1=仍运行中）")
     _add_work_dir(p)
+    p.add_argument("--clip-id", type=int, default=None, metavar="N",
+                   help="只查指定 clip（per-clip 流水线用，不填则查全部）")
 
     # status
     _add_work_dir(sub.add_parser("status", help="查看当前状态"))
