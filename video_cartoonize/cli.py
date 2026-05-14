@@ -416,6 +416,20 @@ def cmd_poll(args: argparse.Namespace) -> int:
         if api_status == STATUS_SUCCEEDED:
             clip.output_url = (r.get("content") or {}).get("video_url", "")
             clip.status     = "success"
+            # 记账（在 success 时拿到真实 usage tokens）
+            from video_cartoonize import billing as _bl
+            usage = r.get("usage") or {}
+            _bl.record(
+                "seedance",
+                clip_id=clip.clip_id,
+                model=r.get("model", ""),
+                duration_s=int(r.get("duration", 0) or 0),
+                resolution=r.get("resolution", ""),
+                ratio=r.get("ratio", ""),
+                task_id=clip.task_id,
+                completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+                total_tokens=int(usage.get("total_tokens", 0) or 0),
+            )
         elif api_status in (STATUS_FAILED, STATUS_CANCELLED):
             err = r.get("error") or {}
             clip.status = "failed"
@@ -695,12 +709,15 @@ def cmd_billing(args: argparse.Namespace) -> int:
 
     print(f"工作目录: {work_dir}")
     print(f"总记录数: {summary['records']}")
+    print(f"总 token 数: {summary.get('grand_total_tokens', 0):,}")
     print()
     print("Seedream (图片生成)")
-    print(f"  调用次数:   {sd['calls']}")
-    print(f"  生成图片数: {sd['images']}")
+    print(f"  调用次数:        {sd['calls']}")
+    print(f"  生成图片数:      {sd['images']}")
+    print(f"  output_tokens:   {sd['output_tokens']:>10,}")
+    print(f"  total_tokens:    {sd['total_tokens']:>10,}")
     if sd['models']:
-        print(f"  模型:       {sd['models']}")
+        print(f"  模型:            {sd['models']}")
     print()
     print("VLM (Seed 2.0 Lite 视频分析 + 风格校验)")
     print(f"  调用次数:        {v['calls']}")
@@ -711,8 +728,10 @@ def cmd_billing(args: argparse.Namespace) -> int:
         print(f"  模型:            {v['models']}")
     print()
     print("Seedance (视频生成)")
-    print(f"  提交次数:        {dn['calls']}")
+    print(f"  succeeded:       {dn['calls']}")
     print(f"  累计输出秒数:    {dn['duration_seconds']} s")
+    print(f"  completion_tok:  {dn['completion_tokens']:>10,}")
+    print(f"  total_tokens:    {dn['total_tokens']:>10,}")
     if dn['models']:
         print(f"  模型:            {dn['models']}")
 
@@ -721,9 +740,10 @@ def cmd_billing(args: argparse.Namespace) -> int:
         print("Per-clip 明细:")
         for cid in sorted(summary["by_clip"].keys(), key=lambda x: int(x)):
             bc = summary["by_clip"][cid]
-            print(f"  clip_{int(cid):02d}: vlm={bc['vlm_calls']}/{bc['vlm_tokens']}tok  "
-                  f"seedream={bc['seedream_calls']}  "
-                  f"seedance={bc['seedance_calls']}/{bc['seedance_duration_s']}s")
+            print(f"  clip_{int(cid):02d}: "
+                  f"sdr={bc['seedream_calls']}/{bc['seedream_tokens']}tok  "
+                  f"vlm={bc['vlm_calls']}/{bc['vlm_tokens']}tok  "
+                  f"sdn={bc['seedance_calls']}/{bc['seedance_duration_s']}s/{bc['seedance_tokens']}tok")
     return 0
 
 

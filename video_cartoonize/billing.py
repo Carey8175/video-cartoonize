@@ -56,17 +56,18 @@ def summarize(work_dir: str) -> dict:
     """聚合 billing.jsonl，返回总计 + 各 clip 明细。"""
     path = os.path.join(work_dir, BILLING_FILE)
     totals: dict = {
-        "seedream": {"calls": 0, "images": 0,             "models": {}},
+        "seedream": {"calls": 0, "images": 0,
+                     "output_tokens": 0, "total_tokens": 0, "models": {}},
         "vlm":      {"calls": 0, "prompt_tokens": 0,
-                                  "completion_tokens": 0,
-                                  "total_tokens": 0,       "models": {}},
-        "seedance": {"calls": 0, "duration_seconds": 0,    "models": {}},
+                     "completion_tokens": 0, "total_tokens": 0, "models": {}},
+        "seedance": {"calls": 0, "duration_seconds": 0,
+                     "completion_tokens": 0, "total_tokens": 0, "models": {}},
     }
     by_clip: dict = {}
     records = 0
 
     if not os.path.exists(path):
-        return {"totals": totals, "records": 0, "by_clip": by_clip}
+        return {"totals": totals, "records": 0, "by_clip": by_clip, "grand_total_tokens": 0}
 
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -84,22 +85,26 @@ def summarize(work_dir: str) -> dict:
 
             if svc == "vlm":
                 t = totals["vlm"]
-                t["calls"] += 1
-                t["prompt_tokens"]     += int(r.get("prompt_tokens", 0) or 0)
-                t["completion_tokens"] += int(r.get("completion_tokens", 0) or 0)
-                t["total_tokens"]      += int(r.get("total_tokens", 0) or 0)
+                t["calls"]              += 1
+                t["prompt_tokens"]      += int(r.get("prompt_tokens", 0) or 0)
+                t["completion_tokens"]  += int(r.get("completion_tokens", 0) or 0)
+                t["total_tokens"]       += int(r.get("total_tokens", 0) or 0)
                 if model:
                     t["models"][model] = t["models"].get(model, 0) + 1
             elif svc == "seedream":
                 t = totals["seedream"]
-                t["calls"]  += 1
-                t["images"] += int(r.get("images", 1) or 1)
+                t["calls"]         += 1
+                t["images"]        += int(r.get("images", 1) or 1)
+                t["output_tokens"] += int(r.get("output_tokens", 0) or 0)
+                t["total_tokens"]  += int(r.get("total_tokens", 0) or 0)
                 if model:
                     t["models"][model] = t["models"].get(model, 0) + 1
             elif svc == "seedance":
                 t = totals["seedance"]
-                t["calls"] += 1
-                t["duration_seconds"] += int(r.get("duration_s", 0) or 0)
+                t["calls"]             += 1
+                t["duration_seconds"]  += int(r.get("duration_s", 0) or 0)
+                t["completion_tokens"] += int(r.get("completion_tokens", 0) or 0)
+                t["total_tokens"]      += int(r.get("total_tokens", 0) or 0)
                 if model:
                     t["models"][model] = t["models"].get(model, 0) + 1
 
@@ -107,16 +112,23 @@ def summarize(work_dir: str) -> dict:
                 k = str(cid)
                 bc = by_clip.setdefault(k, {
                     "vlm_calls": 0, "vlm_tokens": 0,
-                    "seedream_calls": 0, "seedance_calls": 0,
+                    "seedream_calls": 0, "seedream_tokens": 0,
+                    "seedance_calls": 0, "seedance_tokens": 0,
                     "seedance_duration_s": 0,
                 })
                 if svc == "vlm":
                     bc["vlm_calls"]  += 1
                     bc["vlm_tokens"] += int(r.get("total_tokens", 0) or 0)
                 elif svc == "seedream":
-                    bc["seedream_calls"] += 1
+                    bc["seedream_calls"]  += 1
+                    bc["seedream_tokens"] += int(r.get("total_tokens", 0) or 0)
                 elif svc == "seedance":
                     bc["seedance_calls"]      += 1
+                    bc["seedance_tokens"]     += int(r.get("total_tokens", 0) or 0)
                     bc["seedance_duration_s"] += int(r.get("duration_s", 0) or 0)
 
-    return {"totals": totals, "records": records, "by_clip": by_clip}
+    grand_total = (totals["seedream"]["total_tokens"]
+                   + totals["vlm"]["total_tokens"]
+                   + totals["seedance"]["total_tokens"])
+    return {"totals": totals, "records": records, "by_clip": by_clip,
+            "grand_total_tokens": grand_total}

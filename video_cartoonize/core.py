@@ -141,19 +141,9 @@ def submit_clip(
             resolution=cfg.seedance_resolution,
             watermark=False,
         )
-        task_id = result.get("id")
-        # 记账：每个 clip 提交一次任务，计 duration 秒输出
-        billing.record(
-            "seedance",
-            clip_id=clip.clip_id,
-            model=cfg.seedance_model,
-            duration_s=duration,
-            resolution=cfg.seedance_resolution,
-            ratio=ratio,
-            task_id=task_id,
-            ref_images=len(image_urls or []),
-        )
-        return task_id
+        # 不在 submit 时记账（此刻还拿不到 usage tokens），
+        # 在 cli.cmd_poll 检测到 succeeded 时才记 billing
+        return result.get("id")
     except Exception as e:
         print(f"[Seedance] clip {clip.clip_id:02d} submit error: {e}")
         return None

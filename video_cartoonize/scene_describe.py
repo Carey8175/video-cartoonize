@@ -48,11 +48,20 @@ def _seedream_i2i(
         with urllib.request.urlopen(req, timeout=120) as resp:
             result = json.loads(resp.read())
         img_url = result["data"][0]["url"]
+        usage = result.get("usage") or {}
         with urllib.request.urlopen(img_url, timeout=60) as r:
             img_bytes = r.read()
-        # 记账：每次成功一次 Seedream I2I 生成一张图
-        billing.record("seedream", clip_id=clip_id, model=model, size=size,
-                       images=1, ref_count=len(image_refs))
+        # 记账：Seedream 返回 usage.output_tokens / total_tokens / generated_images
+        billing.record(
+            "seedream",
+            clip_id=clip_id,
+            model=model,
+            size=size,
+            ref_count=len(image_refs),
+            images=int(usage.get("generated_images", 1) or 1),
+            output_tokens=int(usage.get("output_tokens", 0) or 0),
+            total_tokens=int(usage.get("total_tokens", 0) or 0),
+        )
         return img_bytes
     except Exception as e:
         print(f"[Seedream I2I] error: {e}")
