@@ -108,7 +108,8 @@ def cmd_init(args: argparse.Namespace) -> int:
             "seedance_resolution": args.resolution,
             "max_retries":         2,
             "poll_interval":       10,
-            "api_key":             _find_key(getattr(args, "api_key", "")),
+            # ⚠ 不写 api_key 到 state.json。运行时通过 ARK_API_KEY 环境变量
+            # 或 ~/.config/video-cartoonize/ark_api_key.txt 读取。
         },
         "clips":           [],
         "prompts":         {},

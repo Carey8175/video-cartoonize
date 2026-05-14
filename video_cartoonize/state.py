@@ -27,7 +27,7 @@ LOCK_FILE  = ".state.lock"
 
 # 当前 state schema 版本。改 ClipInfo 字段或 state 顶层结构时 +1，
 # 并加一个 _migrate_vN_to_vN1 函数。
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 
 def path(work_dir: str) -> str:
@@ -66,6 +66,7 @@ def _migrate(state: dict, path: str) -> dict:
     migrations = {
         1: _migrate_v1_to_v2,
         2: _migrate_v2_to_v3,
+        3: _migrate_v3_to_v4,
     }
     while v < CURRENT_SCHEMA_VERSION:
         state = migrations[v](state)
@@ -109,6 +110,24 @@ def _migrate_v2_to_v3(state: dict) -> dict:
         state["clip_asset_urls"] = {}
     state.setdefault("prompts", {})
     state.setdefault("clip_asset_urls", {})
+    return state
+
+
+def _migrate_v3_to_v4(state: dict) -> dict:
+    """v3 → v4: 安全修复 — 清除 state.config 里明文 API key。
+
+    早期版本错误地把 api_key 写到 state.json，会被 commit / 备份 / 分享。
+    迁移时直接抹掉，运行时从环境变量或 ~/.config/video-cartoonize/ark_api_key.txt 读。
+    """
+    cfg = state.get("config", {})
+    if "api_key" in cfg:
+        had_key = bool(cfg["api_key"])
+        del cfg["api_key"]
+        if had_key:
+            LOGGER.warning(
+                "🔒 已从 state.json 移除明文 API key（v3 历史遗留）。"
+                "后续运行从 ARK_API_KEY 环境变量或 ~/.config/video-cartoonize/ark_api_key.txt 读取。"
+            )
     return state
 
 
@@ -247,7 +266,7 @@ def cfg_from_state(state: dict):
         seedream_model      = c.get("seedream_model",   "seedream-5-0-260128"),
         seedream_image_size = c.get("seedream_image_size", "1440x2560"),
         analyse_fps         = c.get("analyse_fps",           4),
-        api_key             = c.get("api_key",              ""),
+        api_key             = "",   # 永远不从 state 读密钥，由上层 _resolve_key() 解析
         seedance_model      = c.get("seedance_model",   "dreamina-seedance-2-0-260128"),
         seedance_resolution = c.get("seedance_resolution",  "720p"),
         max_retries         = c.get("max_retries",           2),
