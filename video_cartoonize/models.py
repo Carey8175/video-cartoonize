@@ -22,3 +22,9 @@ class ClipInfo:
     style_verified: bool = False     # True = 通过校验
     verify_attempts: int = 0          # 已尝试次数
     verify_reason: str = ""           # 最近一次 VLM 给的判断理由
+
+    # 历次 Seedance 生成记录（包含失败的）
+    # 每一项：{"task_id": "...", "output_url": "...",
+    #          "verdict": "pass"|"fail"|"error", "reason": "..."}
+    # 失败重试时把当前 task_id/output_url 归档到这里，再清空字段触发重提
+    attempts: list = field(default_factory=list)

@@ -503,6 +503,16 @@ def cmd_verify(args: argparse.Namespace) -> int:
             clip, passed, reason, err = f.result()
             clip.verify_attempts += 1
             clip.verify_reason = reason or (err or "")
+
+            # 不论成败，每次校验都归档当前的 task_id + output_url
+            verdict_label = "error" if err else ("pass" if passed else "fail")
+            clip.attempts.append({
+                "task_id":    clip.task_id,
+                "output_url": clip.output_url,
+                "verdict":    verdict_label,
+                "reason":     reason or (err or ""),
+            })
+
             if err:
                 error_clips.append(clip)
                 results.append({"clip_id": clip.clip_id, "verdict": "error",
@@ -514,14 +524,16 @@ def cmd_verify(args: argparse.Namespace) -> int:
                                  "reason": reason, "attempts": clip.verify_attempts})
             else:
                 fail_clips.append(clip)
-                # 没到上限就清空 task_id / output_url，等待重提交
+                # 没到上限就清空 task_id 让 submit 重提；
+                # 但保留 output_url 供 mux fallback 使用（不让生成的视频丢失）
                 if clip.verify_attempts < VERIFY_MAX_ATTEMPTS:
-                    clip.task_id    = ""
-                    clip.output_url = ""
-                    clip.status     = "pending"
+                    clip.task_id = ""
+                    clip.status  = "pending"
+                    # ⚠ 故意保留 clip.output_url，作为兜底视频
                 results.append({"clip_id": clip.clip_id, "verdict": "fail",
                                  "reason": reason, "attempts": clip.verify_attempts,
-                                 "will_retry": clip.verify_attempts < VERIFY_MAX_ATTEMPTS})
+                                 "will_retry": clip.verify_attempts < VERIFY_MAX_ATTEMPTS,
+                                 "archived_url": clip.output_url})
 
     # 加锁合并写回
     with st.lock(work_dir):

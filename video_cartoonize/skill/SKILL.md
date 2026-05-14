@@ -407,9 +407,22 @@ cartoonize verify --work-dir ./my_output
 让 VLM 看一遍 Seedance 生成的视频，判断是不是动漫/卡通风格：
 
 - **通过** → `style_verified=true`，进入下一步
-- **不通过** 且 `verify_attempts < 3` → 清除 `task_id` 和 `output_url`、status 置回 `pending`，
-  agent 重新走 `submit → poll → verify`
-- **不通过** 且 `verify_attempts = 3` → 放弃这个 clip（不会再重试）
+- **不通过** 且 `verify_attempts < 3` → 清除 `task_id`、status 置回 `pending`，
+  agent 重新走 `submit → poll → verify`。**`output_url` 不会被清空**，
+  作为兜底视频保留；每一次的 task_id / output_url / 判定结果都会归档到
+  `clip.attempts[]` 数组里
+- **不通过** 且 `verify_attempts = 3` → 不再重试，`output_url` 和 `task_id`
+  都保留为最后一次的结果，status=success 不变，仅 `style_verified=false`。
+  mux 时仍会处理（用最后一次的视频作兜底）
+
+每个 clip 在 state.json 里的 `attempts` 字段记录所有历次结果：
+```json
+"attempts": [
+  {"task_id":"cgt-...A","output_url":"https://...A","verdict":"fail","reason":"..."},
+  {"task_id":"cgt-...B","output_url":"https://...B","verdict":"fail","reason":"..."},
+  {"task_id":"cgt-...C","output_url":"https://...C","verdict":"pass","reason":"..."}
+]
+```
 
 退出码：
 - **0** = 全部通过校验

@@ -60,6 +60,7 @@ def clip_to_dict(c: ClipInfo) -> dict:
         "style_verified":        c.style_verified,
         "verify_attempts":       c.verify_attempts,
         "verify_reason":         c.verify_reason,
+        "attempts":              c.attempts,
     }
 
 
@@ -78,6 +79,7 @@ def dict_to_clip(d: dict) -> ClipInfo:
     c.style_verified        = d.get("style_verified", False)
     c.verify_attempts       = d.get("verify_attempts", 0)
     c.verify_reason         = d.get("verify_reason", "")
+    c.attempts              = list(d.get("attempts", []))
     return c
 
 
