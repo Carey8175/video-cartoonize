@@ -1,14 +1,33 @@
-"""State file (state.json) read/write helpers."""
+"""State file (state.json) read/write helpers.
+
+State schema 版本管理:
+- 每个 state.json 顶层有 `version` 字段
+- load() 读到旧版本时自动 migrate 到 CURRENT_SCHEMA_VERSION
+- 不兼容的破坏性变更需要写 _migrate_vN_to_vN1 函数
+
+历史版本:
+  v1: 初始版本
+  v2: 新增 clip.attempts[]、clip.style_verified、clip.verify_attempts、verify_reason
+  v3: 新增 clip.subshot_cartoon_urls、prompts dict、clip_asset_urls dict
+"""
 import fcntl
 import json
 import os
 from contextlib import contextmanager
 from typing import List, Optional
 
+from video_cartoonize.errors import StateError
+from video_cartoonize.logsetup import get_logger
 from video_cartoonize.models import ClipInfo
+
+LOGGER = get_logger("state")
 
 STATE_FILE = "state.json"
 LOCK_FILE  = ".state.lock"
+
+# 当前 state schema 版本。改 ClipInfo 字段或 state 顶层结构时 +1，
+# 并加一个 _migrate_vN_to_vN1 函数。
+CURRENT_SCHEMA_VERSION = 3
 
 
 def path(work_dir: str) -> str:
@@ -19,8 +38,78 @@ def load(work_dir: str) -> Optional[dict]:
     p = path(work_dir)
     if not os.path.exists(p):
         return None
-    with open(p, encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(p, encoding="utf-8") as f:
+            state = json.load(f)
+    except json.JSONDecodeError as e:
+        raise StateError(f"state.json 损坏（无法解析）: {e}") from e
+
+    # 自动迁移到当前 schema
+    state = _migrate(state, p)
+    return state
+
+
+# ── Schema 迁移 ─────────────────────────────────────────────────────────────
+
+def _migrate(state: dict, path: str) -> dict:
+    """如果 state.version < CURRENT_SCHEMA_VERSION，按版本号顺序迁移。"""
+    v = int(state.get("version", 1))
+    if v == CURRENT_SCHEMA_VERSION:
+        return state
+    if v > CURRENT_SCHEMA_VERSION:
+        raise StateError(
+            f"state.json 版本 v{v} 比当前 CLI 支持的 v{CURRENT_SCHEMA_VERSION} 新，"
+            "请升级 cartoonize CLI"
+        )
+
+    LOGGER.info("迁移 state.json: v%d → v%d", v, CURRENT_SCHEMA_VERSION)
+    migrations = {
+        1: _migrate_v1_to_v2,
+        2: _migrate_v2_to_v3,
+    }
+    while v < CURRENT_SCHEMA_VERSION:
+        state = migrations[v](state)
+        v += 1
+        state["version"] = v
+
+    # 备份原文件再覆写
+    if path and os.path.exists(path):
+        try:
+            backup = path + f".v{int(state.get('version', 1))-1}.bak"
+            if not os.path.exists(backup):
+                with open(backup, "w", encoding="utf-8") as f:
+                    f.write(open(path, encoding="utf-8").read())
+                LOGGER.info("已备份旧 state 到 %s", backup)
+        except Exception as e:
+            LOGGER.warning("备份失败: %s", e)
+        save_path = path
+        tmp = save_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, save_path)
+
+    return state
+
+
+def _migrate_v1_to_v2(state: dict) -> dict:
+    """v1 → v2: 给每个 clip 补 verify 相关字段。"""
+    for c in state.get("clips", []):
+        c.setdefault("attempts", [])
+        c.setdefault("style_verified", False)
+        c.setdefault("verify_attempts", 0)
+        c.setdefault("verify_reason", "")
+    return state
+
+
+def _migrate_v2_to_v3(state: dict) -> dict:
+    """v2 → v3: 确保 prompts / clip_asset_urls 为 dict 而非 list。"""
+    if isinstance(state.get("prompts"), list):
+        state["prompts"] = {}
+    if isinstance(state.get("clip_asset_urls"), list):
+        state["clip_asset_urls"] = {}
+    state.setdefault("prompts", {})
+    state.setdefault("clip_asset_urls", {})
+    return state
 
 
 def save(work_dir: str, state: dict) -> None:
@@ -32,10 +121,10 @@ def save(work_dir: str, state: dict) -> None:
 
 
 def require(work_dir: str) -> dict:
-    """Load state or exit with error."""
+    """Load state or raise StateError（CLI 入口处统一捕获并退出）。"""
     s = load(work_dir)
     if s is None:
-        raise SystemExit(
+        raise StateError(
             f"state.json not found in {work_dir}\n"
             "Run `cartoonize init --input VIDEO` first."
         )

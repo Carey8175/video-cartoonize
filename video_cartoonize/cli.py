@@ -874,6 +874,11 @@ def build_parser() -> argparse.ArgumentParser:
   cartoonize doctor
         """,
     )
+    # 全局选项（在所有子命令前/后均可）
+    root.add_argument("-v", "--verbose", action="store_true",
+                      help="详细日志（DEBUG 级别，stderr）")
+    root.add_argument("-q", "--quiet", action="store_true",
+                      help="安静模式（WARNING 以上才输出，stderr）")
     sub = root.add_subparsers(dest="cmd", required=True)
 
     # init
@@ -958,13 +963,15 @@ def main() -> int:
     parser = build_parser()
     args   = parser.parse_args()
 
+    # logging 全局初始化（INFO 走 stderr，stdout 留给 JSON）
+    from video_cartoonize.logsetup import setup_logging
+    setup_logging(verbose=getattr(args, "verbose", False),
+                  quiet=getattr(args, "quiet", False))
+
     # 设置当前项目，所有 API 调用的 billing 都写到这里
     from video_cartoonize import billing as _billing
     if hasattr(args, "work_dir") and args.work_dir:
         _billing.set_project(args.work_dir)
-    elif args.cmd == "init":
-        # init 的 work_dir 是动态生成的，cmd_init 内部不需要 billing
-        pass
 
     dispatch = {
         "init":      cmd_init,
@@ -994,7 +1001,20 @@ def main() -> int:
     if fn is None:
         parser.print_help()
         return 1
-    return fn(args)
+
+    # 统一捕获业务异常，让 stdout 始终是合法 JSON
+    from video_cartoonize.errors import CartoonizeError
+    try:
+        return fn(args)
+    except CartoonizeError as e:
+        # 业务异常 → 错误 JSON 走 stdout（agent 能解析），日志走 stderr
+        err_type = type(e).__name__
+        _out({"status": "error", "error_type": err_type, "message": str(e)})
+        print(f"\n❌ {err_type}: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        _out({"status": "interrupted", "message": "interrupted by user"})
+        return 130
 
 
 if __name__ == "__main__":
