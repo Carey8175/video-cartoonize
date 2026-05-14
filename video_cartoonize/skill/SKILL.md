@@ -142,11 +142,20 @@ cartoonize init \
   --input /path/to/video.mp4 \
   --work-dir ./my_output \
   --style anime \
-  --ratio 9:16
+  --ratio 9:16 \
+  --seedance-model standard      # 或 fast，或自定义 endpoint ID
 ```
 
 可用风格：`manhwa` / `anime` / `manhua` / `pixar` / `comic` / `noir` / `custom`  
 自定义风格需加 `--ref-images a.jpg b.jpg`
+
+**Seedance 模型（`--seedance-model`）：**
+
+| 值 | 实际 endpoint ID | 说明 |
+|---|---|---|
+| `standard`（默认）| `dreamina-seedance-2-0-260128` | 质量更高，更慢更贵 |
+| `fast` | `dreamina-seedance-2-0-fast-260128` | 质量略低，速度快约 2-3 倍 |
+| 任意 endpoint ID | 同上 | 自定义模型，原样使用 |
 
 输出：
 ```json
@@ -154,7 +163,8 @@ cartoonize init \
   "status": "ok",
   "work_dir": "/path/to/my_output",
   "input_video": "/path/to/video.mp4",
-  "style": "anime"
+  "style": "anime",
+  "seedance_model": "dreamina-seedance-2-0-260128"
 }
 ```
 
@@ -558,6 +568,7 @@ cartoonize status --work-dir ./my_output
 | `--style` | `anime` | 风格预设 |
 | `--ratio` | 自动检测 | 16:9 / 9:16 / 1:1 / 4:3 / 3:4 / 21:9 |
 | `--resolution` | `720p` | Seedance 输出分辨率 |
+| `--seedance-model` | `standard` | `standard` / `fast` / 自定义 endpoint ID |
 
 ---
 

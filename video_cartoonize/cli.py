@@ -62,6 +62,20 @@ def _resolve_key(cli_key: str = "") -> str:
 # 子命令实现
 # ══════════════════════════════════════════════════════════════════════════════
 
+SEEDANCE_MODEL_ALIASES = {
+    "standard": "dreamina-seedance-2-0-260128",
+    "fast":     "dreamina-seedance-2-0-fast-260128",
+}
+
+
+def _resolve_seedance_model(alias_or_id: str) -> str:
+    """把 'standard'/'fast'/原 ID 都正规化成真实 endpoint ID。"""
+    a = (alias_or_id or "standard").strip().lower()
+    if a in SEEDANCE_MODEL_ALIASES:
+        return SEEDANCE_MODEL_ALIASES[a]
+    return alias_or_id   # 已经是完整 ID，直接用
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     """初始化工作目录，写入 state.json。"""
     from video_cartoonize import state as st
@@ -73,6 +87,8 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     work_dir = os.path.abspath(args.work_dir or f"output_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     os.makedirs(work_dir, exist_ok=True)
+
+    seedance_model = _resolve_seedance_model(getattr(args, "seedance_model", "standard"))
 
     s = {
         "version":    1,
@@ -88,7 +104,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             "seedream_model":      "seedream-5-0-260128",
             "seedream_image_size": "1440x2560",
             "analyse_fps":         4,
-            "seedance_model":      "dreamina-seedance-2-0-260128",
+            "seedance_model":      seedance_model,
             "seedance_resolution": args.resolution,
             "max_retries":         2,
             "poll_interval":       10,
@@ -101,7 +117,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     }
     st.save(work_dir, s)
     _out({"status": "ok", "work_dir": work_dir, "input_video": s["input_video"],
-          "style": args.style})
+          "style": args.style, "seedance_model": seedance_model})
     return 0
 
 
@@ -855,6 +871,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--api-key", default="", metavar="KEY")
     p.add_argument("--scene-threshold",   type=float, default=25.0)
     p.add_argument("--subshot-threshold", type=float, default=27.0)
+
+    # Seedance 模型选择
+    p.add_argument(
+        "--seedance-model", default="standard",
+        help="Seedance 模型：'standard' (dreamina-seedance-2-0-260128)、"
+             "'fast' (dreamina-seedance-2-0-fast-260128)、"
+             "或自定义 endpoint ID。默认: standard",
+    )
 
     # split / keyframes / mux / merge — 全量，无 --clip-id
     for name, help_text in [
