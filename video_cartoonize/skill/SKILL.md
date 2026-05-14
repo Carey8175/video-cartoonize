@@ -221,75 +221,116 @@ cartoonize keyframes --work-dir ./my_output
 
 ---
 
-### Step 2b–5a — 按 clip 并行流水线（★ 必须使用 + 严格控制并发）
+### Step 2b–5a — 流水线 + 收割模式（★ 必须使用）
 
-`cartoon` / `vlm` / `upload` / `submit` 都支持 `--clip-id N`。  
-**Agent 必须使用 per-clip 流水线 + 限制并发数**，不要一次性把所有 clip 全发出去——会被 Seedream/VLM/Seedance 限速、报错、甚至触发服务端拒绝。
+整个流程分两个**并行的工作流**，**绝不要在 poll 上 sleep 等待**：
 
-#### ★ 并发控制规则（硬性要求）
+```
+工作流 A：主动推进（CPU/HTTP 密集，限并发 6）
+  cartoon → vlm → upload → submit
+  ↓
+  clip 进入 "awaiting_poll" 池
 
-| 阶段 | 最大并发 clip 数 | 说明 |
-|------|----------------|------|
-| `cartoon` + `vlm` | **6 个 clip 同时进行** | 两个子步骤本身在内部已并行，外层 clip 级别再开 6 个就够了 |
-| `upload` | **同上，跟随 cartoon/vlm 节奏** | 一个 clip 完成 cartoon+vlm 就立刻 upload |
-| `submit` | **同上** | 提交本身很快（秒级），不会成为瓶颈 |
-| `poll` | 用全量 `poll`（一次性查所有） | 不需要并发 |
+工作流 B：被动收割（每次循环都做一次，不阻塞）
+  cartoonize poll           ← 一次性查所有 awaiting_poll 的 clip 状态
+    ↓ 已 succeeded 的 clip
+  cartoonize verify --clip-id N
+    ↓ pass → 完成
+    ↓ fail → 把 clip 重新放回工作流 A 入口（重试，最多 3 次）
+```
 
-**正确做法是"信号量式"调度**：任何时刻最多 N=6 个 clip 在流水线中（cartoon → vlm → upload → submit → poll → verify 全包含），有一个完成就放下一个进来。**verify 是每个 clip 自己流水线的最后一步**，不要等所有 clip 都做完 Seedance 再统一 verify。
+**核心原则：** `poll` 是一次性查询、秒级返回，不阻塞。每轮调度循环时调用一次 poll 收割已完成的任务，**绝不要 `until cartoonize poll; do sleep 30; done` 卡死**。
+
+#### ★ 并发控制规则
+
+| 项 | 限制 |
+|---|---|
+| 工作流 A 中"in-flight"的 clip（cartoon/vlm/upload/submit 任一阶段）| **最多 6 个同时** |
+| awaiting_poll 池大小 | 不限（Seedance 服务端自己排队）|
+| poll 调用频率 | 每完成一个工作流 A 调用一次；额外定期（30s）调用一次兜底 |
+| verify 并发 | 完成的 clip 立即 verify，无需限并发 |
 
 #### Agent 调度伪代码
 
+```python
+N = 6
+todo         = list(range(total_clips))   # 待启动 stage 1
+stage1       = {}                          # cid → BackgroundTask（cartoon→…→submit）
+awaiting     = set()                       # 已 submit、等 poll 结果
+verify_left  = {cid: 3 for cid in todo}   # 每个 clip 还剩几次 verify 机会
+done         = set()                       # 永久完成（pass 或 attempts 用尽）
+
+while todo or stage1 or awaiting:
+    # ── 1. 填充工作流 A ─────────────────────────────────────
+    while len(stage1) < N and todo:
+        cid = todo.pop(0)
+        stage1[cid] = run_in_background(
+            f"""cartoonize cartoon --work-dir ./out --clip-id {cid} &
+                cartoonize vlm     --work-dir ./out --clip-id {cid} &
+                wait
+                cartoonize upload  --work-dir ./out --clip-id {cid}
+                cartoonize submit  --work-dir ./out --clip-id {cid}"""
+        )
+
+    # ── 2. 收割完成的 stage 1（不阻塞，只检查已完成的）─────
+    for cid in list(stage1):
+        if stage1[cid].is_done():
+            del stage1[cid]
+            awaiting.add(cid)
+
+    # ── 3. 调一次 poll 看哪些 Seedance 完成了 ──────────────
+    poll = cartoonize_poll()   # 全量，秒级
+    for clip in poll["clips"]:
+        cid = clip["clip_id"]
+        if cid not in awaiting:        continue
+        if clip["status"] == "success":
+            # 立刻 verify
+            v = cartoonize_verify(clip_id=cid)
+            awaiting.discard(cid)
+            if v["passed"]:
+                done.add(cid)
+            elif verify_left[cid] > 0:
+                verify_left[cid] -= 1
+                todo.append(cid)          # 回到工作流 A 重做（submit 会自动 image-only 第 3 次）
+            else:
+                done.add(cid)             # 重试次数用完，放弃
+        elif clip["status"] == "failed":
+            awaiting.discard(cid)
+            done.add(cid)
+
+    # ── 4. 短 sleep 避免空转 ───────────────────────────────
+    if stage1 or awaiting:
+        sleep(30)   # 30s 后回到循环顶部继续 poll
 ```
-N = 6                          # 最大并发数
-queue = [0, 1, 2, ..., 51]     # 所有 clip_id
-in_flight = {}                 # 正在处理的 clip → BackgroundTask
 
-while queue or in_flight:
-    # 1. 在空位上放新的 clip
-    while len(in_flight) < N and queue:
-        cid = queue.pop(0)
-        in_flight[cid] = start_pipeline(cid)   # 后台启动整条 per-clip 流水线
-
-    # 2. 等任意一个流水线完成（含 verify 通过/重试到上限）
-    done = wait_any(in_flight.values())
-    del in_flight[done.clip_id]
-
-# 全部 clip verify 完成后，做一次性 mux + merge
-cartoonize mux   --work-dir ./out
-cartoonize merge --work-dir ./out
-```
-
-**每个 clip 完整流水线（含 verify 重试循环）：**
+**Bash 简化版（不要 sleep loop 卡死）：**
 
 ```bash
-# Step A: cartoon + vlm 并行
-cartoonize cartoon --work-dir ./out --clip-id N &
-cartoonize vlm     --work-dir ./out --clip-id N &
-wait
+# 每个 clip 的工作流 A（后台并发跑，最多 6 个）
+run_stage1() {
+  local cid=$1
+  cartoonize cartoon --work-dir ./out --clip-id $cid &
+  cartoonize vlm     --work-dir ./out --clip-id $cid &
+  wait
+  cartoonize upload  --work-dir ./out --clip-id $cid
+  cartoonize submit  --work-dir ./out --clip-id $cid
+}
 
-# Step B: upload（TOS + Assets API）
-cartoonize upload  --work-dir ./out --clip-id N
-
-# Step C: submit → poll → verify 重试循环（最多 3 次）
-attempt=0
-while [ $attempt -lt 3 ]; do
-  cartoonize submit --work-dir ./out --clip-id N
-
-  # 单 clip 轮询直到 success
-  until cartoonize poll --work-dir ./out --clip-id N; do sleep 30; done
-
-  # 单 clip verify，exit 0 = 通过
-  if cartoonize verify --work-dir ./out --clip-id N; then
-    break    # 通过，结束
-  fi
-  attempt=$((attempt+1))
-  # 失败 → verify 已经清了 task_id，循环回去重新 submit
-done
+# 主循环：先把 N 个 clip 启动到 stage 1，然后边推进边 poll/verify
+# 不要在任何一个 clip 上单独 wait Seedance 完成
 ```
 
-> 关键：`poll --clip-id N` 只查这一个 clip 的状态，立刻 exit；`verify --clip-id N` 只 verify 这一个 clip。配合 `--clip-id` 可以做到一个 clip 的 Seedance 一完成就立刻校验，不需要等其他 51 个。
+> **关键点：** Agent 启动 6 个 clip 的 stage 1 后，**立刻继续推进**下一批 clip 进入 stage 1。Seedance 后台跑（每个 clip 2-5min），agent 用这段时间继续做 cartoon/vlm/upload。每隔 30s 调一次 `cartoonize poll` 收割已完成的，立即 verify。
 
-#### ⚠️ 反面案例（不要这样做）
+#### ⚠️ 反面案例
+
+```bash
+# ❌ 死等单 clip 的 Seedance —— agent 完全闲置
+cartoonize submit --clip-id 0
+until cartoonize poll --clip-id 0; do sleep 30; done   # ← 卡 5min！
+cartoonize verify --clip-id 0
+# 然后才开始 clip 1，浪费时间
+```
 
 ```bash
 # ❌ 同时启动全部 52 个 clip 的 cartoon ——会被服务端限速 / 拒绝
@@ -484,19 +525,9 @@ submit 输出的 JSON 会带 `"mode": "video+image"` / `"image-only"`，agent �
 
 **Agent 重试循环（必须实现）：**
 
-```
-loop:
-  # 提交新加入的待提交 clip（已 task_id 的会被 submit 跳过）
-  cartoonize submit --work-dir ./out      # 或对单个 --clip-id N
-
-  # 等所有 task 跑完
-  until cartoonize poll --work-dir ./out; do sleep 30; done
-
-  # 校验风格
-  if cartoonize verify --work-dir ./out:  # exit 0 = 全通过
-    break
-  # 否则失败的 clip 已被重置为 pending，循环回去重新 submit
-```
+> ⚠️ verify 重试逻辑由 Step 2b–5a 的"流水线 + 收割"调度负责。**绝不要**在这里写
+> `until cartoonize poll; do sleep 30; done` 的死循环——那会让 agent 完全闲置。
+> 正确做法见上面的调度伪代码：poll 是一次性非阻塞调用，每隔 30s 唤醒一次即可。
 
 ---
 
