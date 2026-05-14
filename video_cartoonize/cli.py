@@ -321,20 +321,51 @@ def cmd_upload(args: argparse.Namespace) -> int:
 
     # 计算本次新增的 asset URL（per-clip）
     new_clip_asset_urls: Dict[int, str] = {}
+    per_clip_cartoon_urls: Dict[int, list] = {}
+    incomplete: list = []
     for clip in targets:
         vid_key = f"clip_{clip.clip_id:02d}"
         if vid_key in asset_urls:
             new_clip_asset_urls[clip.clip_id] = asset_urls[vid_key]
-        clip.subshot_cartoon_urls = [
+
+        cartoon_urls = [
             asset_urls[f"kf_{clip.clip_id:02d}_{j:02d}"]
             for j in range(len(clip.subshot_cartoon_paths))
             if f"kf_{clip.clip_id:02d}_{j:02d}" in asset_urls
         ]
+        per_clip_cartoon_urls[clip.clip_id] = cartoon_urls
 
-    # 加锁，重读 + 增量合并（并发安全）
+        # 完整性校验: 视频 + 所有 cartoon 帧都必须有 asset URL
+        expected = 1 + len(clip.subshot_cartoon_paths)
+        actual   = (1 if vid_key in asset_urls else 0) + len(cartoon_urls)
+        if actual < expected:
+            incomplete.append({
+                "clip_id":         clip.clip_id,
+                "expected_assets": expected,
+                "actual_assets":   actual,
+                "video_asset_ok":  vid_key in asset_urls,
+                "cartoon_assets":  f"{len(cartoon_urls)}/{len(clip.subshot_cartoon_paths)}",
+            })
+
+    # 任何 clip 的 asset 不完整就 fail-fast（exit 非 0），不写 state
+    if incomplete:
+        _out({
+            "status": "error",
+            "error_type": "AssetUploadError",
+            "message": "asset registration incomplete for some clips",
+            "incomplete": incomplete,
+            "group_id": group_id,
+            "tos_uploaded": len(tos_urls),
+            "assets_active": len(asset_urls),
+        })
+        return 1
+
+    # 加锁，字段级合并（并发安全；只动我们关心的字段）
     with st.lock(work_dir):
         s2 = st.require(work_dir)
-        st.merge_clips(s2, targets)
+        for clip in targets:
+            st.merge_clip_fields(s2, clip.clip_id,
+                                 subshot_cartoon_urls=per_clip_cartoon_urls[clip.clip_id])
         existing = {int(k): v for k, v in s2.get("clip_asset_urls", {}).items()}
         existing.update(new_clip_asset_urls)
         s2["clip_asset_urls"] = {str(k): v for k, v in existing.items()}
@@ -369,16 +400,21 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
     dry_run = bool(getattr(args, "dry_run", False))
 
-    submitted = []
-    preview   = []   # dry-run 时填充
+    submitted   = []
+    preview     = []   # dry-run 时填充
+    missing_url = []   # 缺 asset URL 的 clip（致命错）
     for clip in targets:
         if clip.task_id and not dry_run:  # 已提交过，跳过（dry-run 时显示完整 prompt）
             submitted.append({"clip_id": clip.clip_id, "task_id": clip.task_id, "skipped": True})
             continue
         vid_url = clip_asset_urls.get(clip.clip_id, "")
         if not vid_url:
-            print(f"[submit] clip_{clip.clip_id:02d}: no asset URL, skip", file=sys.stderr)
-            clip.status = "failed"
+            # 缺 video asset URL = 上游 upload 没成功，agent 必须知道
+            missing_url.append({
+                "clip_id":      clip.clip_id,
+                "n_images":     len(clip.subshot_cartoon_urls),
+                "has_paths":    bool(clip.subshot_cartoon_paths),
+            })
             continue
 
         # ── 第 3 次重试（verify_attempts >= 2）改为 image-only 模式 ─────
@@ -428,10 +464,25 @@ def cmd_submit(args: argparse.Namespace) -> int:
               "note": "no Seedance task was actually submitted"})
         return 0
 
-    # 加锁，重读 + 增量合并（并发安全）
+    # 缺 asset URL = 致命错（上游 upload 没成功），不能静默
+    if missing_url:
+        _out({
+            "status": "error",
+            "error_type": "MissingAssetURL",
+            "message": "some clips have no video asset URL — run `cartoonize upload --clip-id N` first",
+            "missing_url": missing_url,
+            "submitted": submitted,  # 已成功提交的也报告一下
+        })
+        return 1
+
+    # 加锁，只更新 task_id / status 字段（避免覆盖其他进程写的 cartoon_urls 等）
     with st.lock(work_dir):
         s2 = st.require(work_dir)
-        st.merge_clips(s2, targets)
+        for clip in targets:
+            if not clip.task_id and clip.status != "failed":
+                continue
+            st.merge_clip_fields(s2, clip.clip_id,
+                                 task_id=clip.task_id, status=clip.status)
         st.save(work_dir, s2)
     _out({"status": "ok", "ratio": ratio, "submitted": submitted})
     return 0
@@ -547,9 +598,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
     ]
 
     if not targets:
-        _out({"status": "ok", "checked": 0, "passed": 0, "failed": 0,
-              "message": "没有需要校验的 clip"})
-        return 0
+        # 区分"没东西可干"和"全过"。caller 不应该把"empty"当成"all passed"
+        _out({"status": "empty", "checked": 0, "passed": 0, "failed": 0,
+              "message": "没有需要校验的 clip（status=success 且未通过校验且有 output_url 的 clip 为 0）"})
+        return 0   # exit 0 但 status=empty，调用方应该检查 status 字段
 
     def check(clip):
         try:

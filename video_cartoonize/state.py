@@ -182,13 +182,32 @@ def clips_to_state(state: dict, clips: List[ClipInfo]) -> None:
 
 
 def merge_clips(state: dict, updated: List[ClipInfo]) -> None:
-    """按 clip_id 增量合并；只更新传入的 clip，其他 clip 字段保持不变。
+    """按 clip_id 整体替换。⚠ 会覆盖该 clip 的所有字段。
 
-    用于并发安全的 per-clip 写入场景（cartoon / vlm / upload / submit）。
+    并发场景下慎用：如果两个进程同时改同一 clip 的不同字段，会丢失另一方写入。
+    优先使用 merge_clip_fields 做字段级合并。
     """
     by_id = {c["clip_id"]: c for c in state.get("clips", [])}
     for c in updated:
         by_id[c.clip_id] = clip_to_dict(c)
+    state["clips"] = [by_id[k] for k in sorted(by_id.keys())]
+
+
+def merge_clip_fields(state: dict, clip_id: int, **fields) -> None:
+    """字段级合并 - 只更新指定字段，保留其他字段。
+
+    并发安全：多个 cmd_* 同时改同一 clip 的不同字段时，互不覆盖。
+
+    用法:
+        with state.lock(work_dir):
+            s = state.require(work_dir)
+            state.merge_clip_fields(s, clip_id=0,
+                subshot_cartoon_urls=urls, status="success")
+            state.save(work_dir, s)
+    """
+    by_id = {c["clip_id"]: c for c in state.get("clips", [])}
+    if clip_id in by_id:
+        by_id[clip_id].update(fields)
     state["clips"] = [by_id[k] for k in sorted(by_id.keys())]
 
 

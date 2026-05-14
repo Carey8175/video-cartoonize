@@ -353,7 +353,9 @@ cartoonize submit  --work-dir ./out
 - clip 总数 ≤ 3（并发收益太小）
 - 调试 / 重跑某个失败阶段
 
-> **state.json 并发安全**：每个子命令只读写自己 clip 的字段，`upload` 和 `submit` 对 state.json 做增量合并，多 clip 并发不会互相覆盖。
+> **state.json 并发安全（0.9.2+）**：`cartoon` / `vlm` / `upload` / `submit` 都使用字段级合并（`merge_clip_fields`），每个命令只写自己负责的字段（如 `upload` 只写 `subshot_cartoon_urls` 和 `clip_asset_urls`，不动 `task_id`、`status` 等）。多 clip 并发 + 跨命令并发都不会互相覆盖。
+>
+> ⚠ 之前 0.9.1 及更早版本用整 dict 替换会有罕见竞态（cartoon 还在跑时 upload 启动的极端场景）。0.9.2 修复。
 
 **cartoon 输出：**
 ```json
