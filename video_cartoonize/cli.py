@@ -68,6 +68,19 @@ SEEDANCE_MODEL_ALIASES = {
 }
 
 
+def _build_final_prompt(clip, prompts_map: dict, preamble: str) -> str:
+    """构造 Seedance final prompt（preamble + image hint + timeline）。"""
+    from video_cartoonize.core import build_image_order_hint
+    base = prompts_map.get(clip.clip_id, preamble)
+    hint = build_image_order_hint(len(clip.subshot_cartoon_urls))
+    if hint and "\n\n" in base:
+        head, tail = base.split("\n\n", 1)
+        return f"{head}\n\n{hint}\n\n{tail}"
+    elif hint:
+        return f"{base}\n\n{hint}"
+    return base
+
+
 
 
 def _resolve_seedance_model(alias_or_id: str) -> str:
@@ -427,17 +440,8 @@ def cmd_submit(args: argparse.Namespace) -> int:
         use_ref_video = clip.verify_attempts < 2
         mode = "image-only" if not use_ref_video else "video+image"
 
-        # 取 cmd_vlm 生成的 prompt（含 preamble + "\n\n" + timeline）
-        # 在两段之间插入 image 顺序提示（A/B 测试胜出的简洁版）
-        base_prompt = prompts.get(clip.clip_id, preamble)
-        hint = build_image_order_hint(len(clip.subshot_cartoon_urls))
-        if hint and "\n\n" in base_prompt:
-            head, tail = base_prompt.split("\n\n", 1)
-            prompt = f"{head}\n\n{hint}\n\n{tail}"
-        elif hint:
-            prompt = f"{base_prompt}\n\n{hint}"
-        else:
-            prompt = base_prompt
+        # 构造 Seedance final prompt（preamble + image hint + timeline）
+        prompt = _build_final_prompt(clip, prompts, preamble)
 
         if dry_run:
             preview.append({
@@ -628,14 +632,15 @@ def cmd_poll(args: argparse.Namespace) -> int:
             case exit code:
                 0 = done       → 拿 res.video_url 接 mux/merge
                 1 = running    → sleep 30s 再 poll
-                2 = retry      → cartoonize run --clip-id N 重做一次
+                                  (CLI 内部已自动 resubmit/重试 verify 失败的 clip)
 
-    内部:
+    内部状态机:
         1. 查 Seedance 状态
         2. 若 SUCCEEDED → 自动 verify_anime_style
             pass → status=done, style_verified=true
-            fail 且 attempts < 3 → 清 task_id, status=retry（agent 重 run）
-            fail 且 attempts >= 3 → status=done, style_verified=false（用兜底视频）
+            fail 且 attempts < 3 → 内部 resubmit Seedance（第3次自动 image-only），
+                                 拿新 task_id，返回 running（不让 agent 操心）
+            fail 且 attempts >= 3 → status=done, style_verified=false（兜底视频）
         3. 若 FAILED/CANCELLED → status=done, error=...
 
     无 --clip-id (全量模式): 仅查询不 verify（向后兼容旧调用）。
@@ -678,12 +683,12 @@ def cmd_poll(args: argparse.Namespace) -> int:
                   "note": "verify exhausted, using fallback"})
             return 0
 
-        # ② 没 task_id 说明还没 submit/run（pending）→ 让 agent 重 run
+        # ② 没 task_id → agent 顺序错了（应该先 cartoonize run --clip-id N 启动）
         if not clip.task_id:
-            _out({"status": "retry", "clip_id": clip.clip_id,
-                  "reason": "no task_id — clip 还没 submit，请先调 cartoonize run --clip-id N",
-                  "verify_attempts": clip.verify_attempts})
-            return 2
+            _out({"status": "error", "clip_id": clip.clip_id,
+                  "error_type": "NoTaskId",
+                  "message": "clip 还未提交 Seedance，请先 cartoonize run --clip-id N"})
+            return 1
 
         # ③ poll Seedance
         try:
@@ -769,23 +774,74 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
         # verify 失败
         if clip.verify_attempts < VERIFY_MAX_ATTEMPTS:
-            # 还能重试：清 task_id 让 agent 重 run（output_url 保留作兜底）
+            # CLI 内部自动 resubmit Seedance，不打扰 agent
+            # 第 3 次（verify_attempts==2 之后）自动切 image-only 模式
+            from video_cartoonize.core import submit_clip, build_preamble, detect_ratio
+            from video_cartoonize.styles import get_style
+
+            clip_asset_urls = {int(k): v for k, v in s.get("clip_asset_urls", {}).items()}
+            vid_url = clip_asset_urls.get(clip.clip_id, "")
+            if not vid_url:
+                # 没 video asset 完全无法重试，标兜底 done
+                with st.lock(work_dir):
+                    s2 = st.require(work_dir)
+                    st.merge_clip_fields(s2, clip.clip_id,
+                                         output_url=video_url, status="success",
+                                         style_verified=False,
+                                         verify_attempts=clip.verify_attempts,
+                                         verify_reason=reason,
+                                         attempts=clip.attempts)
+                    st.save(work_dir, s2)
+                _out({"status": "done", "clip_id": clip.clip_id,
+                      "video_url": video_url, "style_verified": False,
+                      "note": "no video asset URL for resubmit, fallback"})
+                return 0
+
+            prompts_map = {int(k): v for k, v in s.get("prompts", {}).items()}
+            ratio = s["config"].get("ratio") or detect_ratio(clip.resized_path)
+            style = get_style(s["config"]["style_id"])
+            preamble = build_preamble(style.description)
+            prompt = _build_final_prompt(clip, prompts_map, preamble)
+            use_ref = clip.verify_attempts < 2   # 第 3 次（attempts==2 -> use_ref=False）
+            mode = "image-only" if not use_ref else "video+image"
+
+            new_task_id = submit_clip(cfg.api_key, clip, vid_url, prompt, ratio, cfg,
+                                       use_reference_video=use_ref)
+            if not new_task_id:
+                # resubmit 失败：当兜底 done
+                with st.lock(work_dir):
+                    s2 = st.require(work_dir)
+                    st.merge_clip_fields(s2, clip.clip_id,
+                                         output_url=video_url, status="success",
+                                         style_verified=False,
+                                         verify_attempts=clip.verify_attempts,
+                                         verify_reason=reason,
+                                         attempts=clip.attempts)
+                    st.save(work_dir, s2)
+                _out({"status": "done", "clip_id": clip.clip_id,
+                      "video_url": video_url, "style_verified": False,
+                      "note": "internal resubmit failed, fallback to last attempt"})
+                return 0
+
+            # 更新 task_id，保留旧 output_url 作兜底
+            clip.task_id = new_task_id
             with st.lock(work_dir):
                 s2 = st.require(work_dir)
                 st.merge_clip_fields(s2, clip.clip_id,
-                                     task_id="", status="pending",
-                                     output_url=video_url,  # 保留作兜底
+                                     task_id=new_task_id, status="pending",
+                                     output_url=video_url,  # 旧视频先留着
                                      style_verified=False,
                                      verify_attempts=clip.verify_attempts,
                                      verify_reason=reason,
                                      attempts=clip.attempts)
                 st.save(work_dir, s2)
-            _out({"status": "retry", "clip_id": clip.clip_id,
+            _out({"status": "running", "clip_id": clip.clip_id,
+                  "task_id": new_task_id, "mode": mode,
                   "verify_attempts": clip.verify_attempts,
                   "max_attempts": VERIFY_MAX_ATTEMPTS,
-                  "reason": reason,
-                  "next_step": f"cartoonize run --clip-id {clip.clip_id}"})
-            return 2
+                  "auto_resubmitted": True,
+                  "last_verify_fail_reason": reason})
+            return 1
         else:
             # 用完 3 次：用兜底视频
             with st.lock(work_dir):

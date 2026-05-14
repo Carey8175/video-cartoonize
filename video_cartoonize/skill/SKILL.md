@@ -250,13 +250,13 @@ cartoonize keyframes --work-dir ./my_output
 | poll 调用频率 | 每完成一个工作流 A 调用一次；额外定期（30s）调用一次兜底 |
 | verify 并发 | 完成的 clip 立即 verify，无需限并发 |
 
-#### Agent 调度伪代码（简化后只用 run + poll）
+#### Agent 调度伪代码（极简：只用 run + poll，2 个 exit code）
 
 ```python
 N = 6
-todo     = list(range(total_clips))   # 待处理
-stage1   = {}                          # cid → BackgroundTask("cartoonize run --clip-id N")
-awaiting = set()                       # 已 run 完, 等 poll 返回 done/retry
+todo     = list(range(total_clips))
+stage1   = {}                          # cid → BackgroundTask
+awaiting = set()                       # 已 run 完, 等 poll 返回 done
 done     = {}                          # cid → video_url
 
 while todo or stage1 or awaiting:
@@ -273,28 +273,25 @@ while todo or stage1 or awaiting:
             del stage1[cid]
             awaiting.add(cid)
 
-    # 3. 一次性 poll（含 verify 集成）
+    # 3. poll（CLI 自己处理 verify + 重试，agent 只看 done/running）
     for cid in list(awaiting):
         res = cartoonize_poll(clip_id=cid)
-        # exit code 表达语义；res 是 stdout JSON
-        if res.exit == 0:        # done
+        if res.exit == 0:           # done
             done[cid] = res.json["video_url"]
             awaiting.discard(cid)
-        elif res.exit == 2:      # retry：verify 不过且 < 3 次
-            awaiting.discard(cid)
-            todo.append(cid)     # 重新 run 一次（submit 会自动 image-only 第 3 次）
-        # exit == 1: running, 留在 awaiting
+        # exit == 1: running（包括 CLI 内部自动 resubmit 后还在跑），留在 awaiting
 
     if stage1 or awaiting:
         sleep(30)
 ```
 
-> **`cartoonize poll --clip-id N` 是 agent 唯一需要的查询命令**，内部已集成：
+> **`cartoonize poll --clip-id N` 是 agent 唯一需要的查询命令**。CLI 内部已集成：
 > - Seedance 状态查询
-> - VLM 风格校验
-> - 重试调度（清 task_id 让 agent 重 run）
+> - VLM 风格校验（成功后自动跑）
+> - 失败时**自动 resubmit Seedance**（第 3 次切 image-only）
+> - 3 次都失败 → 用兜底视频 done
 >
-> Agent **不需要直接调** `cartoonize verify`。
+> Agent **不需要**直接调 `verify`，**不需要**自己处理 retry 逻辑。
 
 #### Bash 极简版
 
@@ -305,20 +302,17 @@ for cid in 0 1 2 3 4 5; do
 done
 wait
 
-# poll 每个 clip 直到 done/retry，retry 自动重 run
+# poll 每个 clip 直到 done（CLI 自动处理 retry）
 for cid in 0 1 2 3 4 5; do
   while true; do
     cartoonize poll --work-dir ./out --clip-id $cid
-    case $? in
-      0) break ;;                                              # done
-      2) cartoonize run --work-dir ./out --clip-id $cid ;;     # retry
-      *) sleep 30 ;;                                           # running
-    esac
+    [ $? -eq 0 ] && break
+    sleep 30
   done
 done
 ```
 
-> **`cartoonize run --clip-id N` 是 agent 调度的主命令**：内部并行 cartoon+vlm、串行 upload→submit，返回 `{task_id, mode}`。
+> **两个命令：** `cartoonize run --clip-id N` 启动；`cartoonize poll --clip-id N` 查询直到 done。
 
 #### ⚠️ 反面案例
 
