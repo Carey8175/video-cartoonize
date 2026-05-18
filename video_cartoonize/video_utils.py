@@ -140,11 +140,41 @@ def split_video(video_path: str, out_dir: str, cfg: PipelineConfig) -> List[str]
     return result
 
 
-def resize_video(src: str, dst: str, limit: int) -> None:
-    vf = (
-        f"scale='if(lte(iw*ih,{limit}),iw,floor(iw*sqrt({limit}/(iw*ih))/2)*2)':"
-        f"'if(lte(iw*ih,{limit}),ih,floor(ih*sqrt({limit}/(iw*ih))/2)*2)'"
+# Seedance Assets API 对 Video 输入的像素范围限制（实测）
+# 太小（< 720p ≈ 921600）会被 InvalidParameter.PixelCount 拒掉
+# 太大（> ~4K）也会被拒
+SEEDANCE_VIDEO_MIN_PIXELS = 921600     # 1280×720
+SEEDANCE_VIDEO_MAX_PIXELS = 4194304    # 2048×2048 等价
+
+
+def resize_video(src: str, dst: str, limit: int,
+                 min_pixels: int = SEEDANCE_VIDEO_MIN_PIXELS) -> None:
+    """缩放视频到 [min_pixels, limit] 区间内（≥ 720p, ≤ pixel_limit）。
+
+    - 像素数 > limit         → 等比缩小到 limit
+    - 像素数 < min_pixels    → 等比放大到 min_pixels（避免被 Seedance 拒）
+    - 中间                  → 保持原尺寸（仅重新编码）
+
+    Seedance 对输入视频有最小像素要求（实测 480x848 = 407K 会被
+    InvalidParameter.PixelCount 拒掉），所以小视频必须放大。
+    """
+    # ffmpeg 表达式: pixels 用 (iw*ih)
+    #  scale 后宽:
+    #    若 iw*ih > limit      → floor 到偶数（缩小，允许略低于 limit）
+    #    若 iw*ih < min_pixels → ceil  到偶数（放大，保证 ≥ min_pixels）
+    #    否则 → iw
+    #  高同理
+    #  注意：floor 用于缩小，ceil 用于放大；都必须落在偶数上（H.264 yuv420p 要求）
+    safe_min = int(min_pixels * 1.02)  # 2% 余量，防止两边 ceil 后乘积仍卡边界
+    vf_w = (
+        f"if(gt(iw*ih,{limit}),floor(iw*sqrt({limit}/(iw*ih))/2)*2,"
+        f"if(lt(iw*ih,{min_pixels}),ceil(iw*sqrt({safe_min}/(iw*ih))/2)*2,iw))"
     )
+    vf_h = (
+        f"if(gt(iw*ih,{limit}),floor(ih*sqrt({limit}/(iw*ih))/2)*2,"
+        f"if(lt(iw*ih,{min_pixels}),ceil(ih*sqrt({safe_min}/(iw*ih))/2)*2,ih))"
+    )
+    vf = f"scale='{vf_w}':'{vf_h}'"
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
            "-i", src, "-vf", vf, "-c:v", "libx264", "-pix_fmt", "yuv420p",
            "-crf", "18", "-preset", "medium", "-c:a", "copy", dst]
@@ -169,14 +199,13 @@ def _ffprobe_sig(path: str) -> dict:
 def merge_clips(
     clip_paths: List[str],
     output_path: str,
-    audio_crossfade: float = 0.1,
+    audio_crossfade: float = 0.0,
 ) -> None:
-    """拼接所有片段，音轨在相邻片段间做 crossfade 平滑过渡。
+    """拼接所有片段。默认走 concat 路径（无损 -c copy，无音画漂移）。
 
-    audio_crossfade: 相邻 clip 之间音频交叉淡化的时长（秒），设 0 关闭。
-    视频按 hard cut 拼接（无视觉过渡），音频用 acrossfade 平滑。
-    总体音频会因 crossfade 略短于视频 (N-1)*fade 秒，mp4 容器允许末尾
-    短时无声，绝大多数播放器无感。
+    audio_crossfade > 0 时启用相邻 clip 音频 acrossfade 平滑过渡，但每次
+    crossfade 会让音轨比视频短 `audio_crossfade` 秒，N 段累积 (N-1)*fade
+    秒——长片（如 50+ clip）末尾音画偏差可达数秒，**不要在长片打开**。
     """
     if not clip_paths:
         print("[Merge] nothing to merge")

@@ -1462,6 +1462,37 @@ def cmd_estimate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    """从远端重跑 install.sh，把 cartoonize 升级到指定分支/tag。"""
+    import shlex
+
+    ref   = args.ref  or os.environ.get("VIDEO_CARTOONIZE_REF",  "main")
+    repo  = args.repo or os.environ.get("VIDEO_CARTOONIZE_REPO", "Carey8175/video-cartoonize")
+    token = os.environ.get("GITHUB_TOKEN", "")
+
+    url = f"https://raw.githubusercontent.com/{repo}/{ref}/install.sh"
+    if token:
+        curl = f"curl -fsSL -H 'Authorization: token {token}' {shlex.quote(url)}"
+    else:
+        curl = f"curl -fsSL {shlex.quote(url)}"
+
+    # install.sh 自己也读这些环境变量
+    env = os.environ.copy()
+    env["VIDEO_CARTOONIZE_REF"]  = ref
+    env["VIDEO_CARTOONIZE_REPO"] = repo
+
+    print(f"[update] fetching {repo}@{ref}", file=sys.stderr)
+    proc = subprocess.run(["bash", "-c", f"{curl} | bash"], env=env)
+    if proc.returncode == 0:
+        print(f"[update] ✓ done. Run: cartoonize version", file=sys.stderr)
+    else:
+        print(f"[update] ✗ failed (exit {proc.returncode})", file=sys.stderr)
+        if not token:
+            print(f"[update]   if {repo} is private, export GITHUB_TOKEN=<pat> first",
+                  file=sys.stderr)
+    return proc.returncode
+
+
 def cmd_version(args: argparse.Namespace) -> int:
     """显示 CLI 版本、Python 版本、安装位置。"""
     import platform
@@ -1632,6 +1663,13 @@ def build_parser() -> argparse.ArgumentParser:
     # version
     sub.add_parser("version", help="显示版本信息")
 
+    # update
+    p = sub.add_parser("update", help="升级 cartoonize 到最新版本（远端重跑 install.sh）")
+    p.add_argument("--ref",  default=None, metavar="REF",
+                   help="分支/tag/commit（默认 main，或 $VIDEO_CARTOONIZE_REF）")
+    p.add_argument("--repo", default=None, metavar="OWNER/NAME",
+                   help="GitHub repo（默认 Carey8175/video-cartoonize，或 $VIDEO_CARTOONIZE_REPO）")
+
     # billing
     p = sub.add_parser("billing", help="显示项目 Seedream/VLM/Seedance 用量汇总（含 USD 成本）")
     _add_work_dir(p)
@@ -1684,6 +1722,7 @@ def main() -> int:
         "doctor":        cmd_doctor,
         "install-skill": cmd_install_skill,
         "version":       cmd_version,
+        "update":        cmd_update,
         "billing":       cmd_billing,
         "estimate":      cmd_estimate,
         "logs":          cmd_logs,
