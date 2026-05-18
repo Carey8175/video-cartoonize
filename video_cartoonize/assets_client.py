@@ -287,7 +287,7 @@ def _call(
             err_body = exc.read().decode("utf-8", errors="ignore")
             retryable = exc.code in (408, 429, 500, 502, 503, 504)
             raise APIError(
-                f"{action} failed [HTTP {exc.code}]: {err_body[:200]}",
+                f"{action} failed [HTTP {exc.code}]: {err_body[:1000]}",
                 service="assets", status=exc.code, retryable=retryable,
             ) from exc
         except Exception as exc:

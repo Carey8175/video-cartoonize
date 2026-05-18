@@ -810,6 +810,9 @@ def cmd_poll(args: argparse.Namespace) -> int:
         clip.status     = "success"
         from video_cartoonize import billing as _bl
         usage = r.get("usage") or {}
+        # has_video_input 与 submit 时一致（submit 规则: verify_attempts < 2）
+        # poll 在 verify 自增 verify_attempts 之前发生，所以这里读出的值就是提交时的值
+        has_video_input = clip.verify_attempts < 2
         _bl.record(
             "seedance",
             clip_id=clip.clip_id,
@@ -818,6 +821,7 @@ def cmd_poll(args: argparse.Namespace) -> int:
             resolution=r.get("resolution", ""),
             ratio=r.get("ratio", ""),
             task_id=clip.task_id,
+            has_video_input=has_video_input,
             completion_tokens=int(usage.get("completion_tokens", 0) or 0),
             total_tokens=int(usage.get("total_tokens", 0) or 0),
         )
@@ -1316,31 +1320,31 @@ def cmd_billing(args: argparse.Namespace) -> int:
 
     print(f"工作目录: {work_dir}")
     print(f"总记录数: {summary['records']}")
-    print(f"总 token 数: {summary.get('grand_total_tokens', 0):,}")
-    print(f"总成本估算: ${summary.get('grand_total_usd', 0):.4f} USD "
-          f"(按默认价目表，可在 ~/.config/video-cartoonize/prices.json 覆盖)")
+    print(f"总成本: ${summary.get('grand_total_usd', 0):.4f} USD  "
+          f"(BytePlus 官方价；可在 ~/.config/video-cartoonize/prices.json 覆盖)")
     print()
-    print("Seedream (图片生成)")
+    print("Seedream (图片生成 · 按张计价 $0.035/张)")
     print(f"  调用次数:        {sd['calls']}")
-    print(f"  生成图片数:      {sd['images']}")
-    print(f"  total_tokens:    {sd['total_tokens']:>10,}")
+    print(f"  生成图片数:      {sd['images']} 张")
     print(f"  成本:            ${sd.get('cost_usd', 0):>9.4f}")
     if sd['models']:
         print(f"  模型:            {sd['models']}")
     print()
-    print("VLM (Seed 2.0 Lite 视频分析 + 风格校验)")
+    print("VLM (Seed 2.0 Lite · input $0.25/M + output $0.50/M)")
     print(f"  调用次数:        {v['calls']}")
     print(f"  prompt_tokens:   {v['prompt_tokens']:>10,}")
     print(f"  completion_tok:  {v['completion_tokens']:>10,}")
-    print(f"  total_tokens:    {v['total_tokens']:>10,}")
     print(f"  成本:            ${v.get('cost_usd', 0):>9.4f}")
     if v['models']:
         print(f"  模型:            {v['models']}")
     print()
-    print("Seedance (视频生成)")
-    print(f"  succeeded:       {dn['calls']}")
-    print(f"  累计输出秒数:    {dn['duration_seconds']} s")
-    print(f"  total_tokens:    {dn['total_tokens']:>10,}")
+    print("Seedance (视频生成 · 按 token，with-video / without-video 不同价)")
+    print(f"  succeeded:       {dn['calls']}  (with-video={dn.get('with_video_calls', 0)}, "
+          f"without-video={dn.get('without_video_calls', 0)})")
+    print(f"  with-video toks: {dn.get('with_video_tokens', 0):>10,}")
+    print(f"  no-video  toks:  {dn.get('without_video_tokens', 0):>10,}")
+    print(f"  total_tokens:    {dn['total_tokens']:>10,}  "
+          f"(≈ {dn['duration_seconds']} s 输出视频)")
     print(f"  成本:            ${dn.get('cost_usd', 0):>9.4f}")
     if dn['models']:
         print(f"  模型:            {dn['models']}")
