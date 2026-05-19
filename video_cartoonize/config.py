@@ -15,7 +15,9 @@ class PipelineConfig:
     # ── Phase 2b: Seedream I2I ────────────────────────────────────────
     style_id: str = "anime"
     seedream_model: str = "seedream-5-0-260128"
-    seedream_image_size: str = "1440x2560"
+    # "auto" → 按关键帧实际宽高比派生 WxH（保持纵横比，像素数贴近 Seedream
+    # 5.0 lite 下限 3,686,400）。也可以显式写死如 "1440x2560"。
+    seedream_image_size: str = "auto"
 
     # ── Phase 3: video-analyse ────────────────────────────────────────
     analyse_fps: int = 4

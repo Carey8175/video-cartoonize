@@ -118,7 +118,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             "scene_threshold":     args.scene_threshold,
             "subshot_threshold":   args.subshot_threshold,
             "seedream_model":      "seedream-5-0-260128",
-            "seedream_image_size": "1440x2560",
+            "seedream_image_size": "auto",
             "analyse_fps":         4,
             "seedance_model":      seedance_model,
             "seedance_resolution": args.resolution,

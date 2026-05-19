@@ -264,7 +264,7 @@ def cfg_from_state(state: dict):
         subshot_threshold   = c.get("subshot_threshold",  27.0),
         style_id            = c.get("style_id",         "anime"),
         seedream_model      = c.get("seedream_model",   "seedream-5-0-260128"),
-        seedream_image_size = c.get("seedream_image_size", "1440x2560"),
+        seedream_image_size = c.get("seedream_image_size", "auto"),
         analyse_fps         = c.get("analyse_fps",           4),
         api_key             = "",   # 永远不从 state 读密钥，由上层 _resolve_key() 解析
         seedance_model      = c.get("seedance_model",   "dreamina-seedance-2-0-260128"),

@@ -11,6 +11,36 @@ from video_cartoonize.sub_shot_detect import extract_sub_shot_keyframes
 
 _ARK_IMAGE_URL = "https://ark.ap-southeast.bytepluses.com/api/v3/images/generations"
 
+# Seedream 5.0 lite (and 4-5) require output pixels ∈ [3_686_400, 16_777_216]
+# and aspect (w/h) ∈ [1/16, 16]. Target sits ~6% above the floor so any
+# multiple-of-8 rounding still clears it.
+_SEEDREAM_PX_FLOOR  = 3_686_400
+_SEEDREAM_PX_TARGET = 3_900_000
+
+
+def _seedream_size_for_frame(frame_path: str) -> str:
+    """Return ``WxH`` matching the frame's aspect ratio at the Seedream
+    pixel floor. Falls back to ``1440x2560`` (9:16, floor) if the image
+    cannot be opened.
+    """
+    try:
+        from PIL import Image
+        with Image.open(frame_path) as im:
+            w, h = im.size
+    except Exception:
+        return "1440x2560"
+    if not w or not h:
+        return "1440x2560"
+    ar = max(1 / 16, min(16.0, w / h))
+    out_h = (_SEEDREAM_PX_TARGET / ar) ** 0.5
+    out_w = out_h * ar
+    out_w = ((int(out_w) + 7) // 8) * 8
+    out_h = ((int(out_h) + 7) // 8) * 8
+    while out_w * out_h < _SEEDREAM_PX_FLOOR:
+        out_w += 8
+        out_h += 8
+    return f"{out_w}x{out_h}"
+
 
 def _seedream_i2i(
     frame_path: str,
@@ -18,9 +48,11 @@ def _seedream_i2i(
     api_key: str,
     prompt: str,
     model: str = "seedream-5-0-260128",
-    size: str = "1440x2560",
+    size: Optional[str] = None,
     clip_id: int | None = None,
 ) -> Optional[bytes]:
+    if not size or size == "auto":
+        size = _seedream_size_for_frame(frame_path)
     all_paths = [frame_path] + style_ref_paths[:13]
     image_refs = []
     for p in all_paths:
@@ -158,7 +190,7 @@ def cartoonize_subshot_frames(
     api_key: str,
     clip_id: int = 0,
     model: str = "seedream-5-0-260128",
-    size: str = "1440x2560",
+    size: Optional[str] = None,
     max_workers: int = 5,
 ) -> List[str]:
     """Phase 2b — Seedream I2I on every key frame for one clip (concurrent)."""
