@@ -153,6 +153,18 @@ def cmd_split(args: argparse.Namespace) -> int:
     os.makedirs(resized_dir, exist_ok=True)
 
     raw_paths = split_video(s["input_video"], clips_dir, cfg)
+    if not raw_paths:
+        # PySceneDetect found no cuts (or _adjust_scenes filtered all of them
+        # out — short/static clips). Fall back to treating the whole video as
+        # one clip so the rest of the pipeline can still run.
+        import shutil as _sh
+        os.makedirs(clips_dir, exist_ok=True)
+        src = s["input_video"]
+        name = os.path.basename(src).rsplit(".", 1)[0]
+        single = os.path.join(clips_dir, f"{name}-Clip-001.mp4")
+        _sh.copy2(src, single)
+        raw_paths = [single]
+        print("[Split] no scenes detected — falling back to single-clip mode")
     clips: List[ClipInfo] = []
     for i, raw in enumerate(raw_paths):
         dst = os.path.join(resized_dir, os.path.basename(raw))
