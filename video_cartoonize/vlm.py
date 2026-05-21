@@ -118,89 +118,32 @@ _VERIFY_SYSTEM = (
     "You always reply with a single valid JSON object and nothing else."
 )
 
-# 0.14.6+: 三维校验
-#   characters_anime — 主体角色（人脸/身体/服装）是否为动漫风格
-#   backgrounds_anime — 背景元素（墙、地板、家具、道具、天空、植物）是否为动漫风格
-#   has_live_action — 是否存在任何真人/真实照片质感残留
-# 全部要 characters_anime=true AND backgrounds_anime=true AND has_live_action=false 才算 pass。
-# is_anime 字段保留作为汇总（向后兼容旧调用方），等价于三轴的逻辑 AND。
 _VERIFY_USER = (
-    "Look at the video and analyze its visual style across three independent axes. "
-    "Fully animated means anime / cartoon / manga / manhwa / manhua / Pixar-3D / "
-    "hand-drawn illustration with no photorealistic textures.\n\n"
-    "Reply with a single JSON object on one line, EXACTLY this schema:\n"
-    '{"characters_anime": true|false, '
-    '"backgrounds_anime": true|false, '
-    '"has_live_action": true|false, '
-    '"is_anime": true|false, '
-    '"reason": "one short sentence explaining the verdict"}\n\n'
-    "Axis definitions:\n"
-    "- characters_anime: every main human character (face, skin, hair, clothing) "
-    "is rendered in cartoon style; no photorealistic skin texture, no real human "
-    "facial features.\n"
-    "- backgrounds_anime: every background element (walls, floor, ceiling, "
-    "furniture, posters, props, sky, foliage, vehicles, ambient elements) is "
-    "rendered in cartoon style; no photorealistic textures, no real-world "
-    "photographic appearance.\n"
-    "- has_live_action: any region of any frame contains live-action footage, "
-    "real-person faces, photorealistic skin/hair, or unconverted real-world "
-    "textures bleeding through.\n"
-    "- is_anime: SET TO TRUE ONLY IF characters_anime=true AND backgrounds_anime=true "
-    "AND has_live_action=false. Otherwise false.\n\n"
+    "Look at the video and decide if its visual style is fully animated "
+    "(anime / cartoon / manga / manhwa / manhua / Pixar-3D / hand-drawn "
+    "illustration). Real-life live-action footage, photorealistic CGI, or "
+    "any real-person face/skin/hair must be classified as NOT animated.\n\n"
+    "Reply with a single JSON object on one line, exactly this schema:\n"
+    '{"is_anime": true|false, "reason": "one short sentence"}\n\n'
     "Strict rules:\n"
     "- Output ONLY the JSON object. No markdown fences, no preamble, no "
     "trailing text, no 'LINE 1:' prefix.\n"
-    "- All boolean fields must be JSON booleans (true / false), not strings.\n"
-    "- reason ≤ 30 words; if is_anime=false, name WHICH axis failed and where."
+    "- is_anime must be a JSON boolean (true / false), not a string.\n"
+    "- reason is a short English sentence (≤ 25 words)."
 )
 
 
 def _parse_verify(raw: str) -> tuple[bool, str]:
-    """解析 VLM 返回的 JSON。
-
-    0.14.6+ schema: {characters_anime, backgrounds_anime, has_live_action,
-                     is_anime, reason}
-    向后兼容旧 schema: {is_anime, reason}
-
-    Returns (passed, reason)。passed=True 仅当三轴都达标（或旧 schema 的 is_anime=true）。
-    """
+    """解析 VLM 返回的 JSON {is_anime, reason}，带兜底。"""
     import re
 
     text = raw.strip()
 
-    def _evaluate(obj: dict) -> tuple[bool, str] | None:
-        """从解析出的 dict 里抽 verdict + reason。返回 None 表示 schema 不符。"""
-        reason = str(obj.get("reason", ""))[:300]
-        # 新 schema：三轴 + is_anime 汇总
-        if "characters_anime" in obj and "backgrounds_anime" in obj:
-            chars = bool(obj.get("characters_anime"))
-            bgs   = bool(obj.get("backgrounds_anime"))
-            live  = bool(obj.get("has_live_action", False))
-            summary = bool(obj.get("is_anime", chars and bgs and not live))
-            passed  = chars and bgs and (not live) and summary
-            # 失败时把哪一轴失败追加进 reason，方便 retry 决策
-            if not passed and reason:
-                tags = []
-                if not chars: tags.append("characters_not_anime")
-                if not bgs:   tags.append("background_not_anime")
-                if live:      tags.append("has_live_action")
-                if tags:
-                    reason = f"[{'/'.join(tags)}] {reason}"
-                # else: 模型三轴都通过但 is_anime=false（自相矛盾），
-                # 不加 tag prefix；以 summary 为准失败掉
-            return passed, reason
-        # 旧 schema：仅 is_anime
-        if "is_anime" in obj:
-            return bool(obj["is_anime"]), reason
-        return None
-
     # 1) 直接 json.loads
     try:
         obj = json.loads(text)
-        if isinstance(obj, dict):
-            res = _evaluate(obj)
-            if res is not None:
-                return res
+        if isinstance(obj, dict) and "is_anime" in obj:
+            return bool(obj["is_anime"]), str(obj.get("reason", ""))[:300]
     except Exception:
         pass
 
@@ -209,10 +152,8 @@ def _parse_verify(raw: str) -> tuple[bool, str]:
     if m:
         try:
             obj = json.loads(m.group(0))
-            if isinstance(obj, dict):
-                res = _evaluate(obj)
-                if res is not None:
-                    return res
+            if isinstance(obj, dict) and "is_anime" in obj:
+                return bool(obj["is_anime"]), str(obj.get("reason", ""))[:300]
         except Exception:
             pass
 
@@ -225,8 +166,7 @@ def _parse_verify(raw: str) -> tuple[bool, str]:
 
     animated_kw = ("anime", "cartoon", "animated", "illustrat", "manhwa",
                    "manga", "manhua", "pixar")
-    real_kw     = ("real-life", "live-action", "photoreal", "real person",
-                   "real face", "real background")
+    real_kw     = ("real-life", "live-action", "photoreal", "real person", "real face")
     passed = (any(k in flat for k in animated_kw)
               and not any(k in flat for k in real_kw))
     return passed, text[:300]
