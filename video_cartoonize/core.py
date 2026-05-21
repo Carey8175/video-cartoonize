@@ -52,23 +52,14 @@ def build_preamble(style_description: str) -> str:
 
     实测对 5 个泄漏真人内容的 clip 通过率 4/5（80%），显著优于其他变体。
     与 build_image_order_hint() 配合使用，构成完整 prompt 头部。
-
-    0.14.6+: 追加背景一致性约束。先前 Seedance 在 video+image 模式下会从原视频
-    的稳定静态区域（远景墙、地板、天花板）吸入真实纹理，造成"前景动漫 + 背景真实"
-    的混合输出。下面这段显式禁止真人纹理 carry-over，并要求背景与角色同样卡通化。
     """
     return (
         "Task: adapt the live-action reference video into a manhwa/anime "
         "animated short. Like adapting a TV drama into its animated "
         "counterpart — same plot, same beats, same camera moves, but the "
         "entire visual is now hand-drawn animation. Follow the key frame "
-        "images exactly for character design and color palette. "
-        "Render EVERY background element (walls, floor, ceiling, furniture, "
-        "posters, props, sky, foliage, lighting, ambient atmosphere) in the "
-        "same cartoon style as the key frames — NO photorealistic textures, "
-        "NO real-world materials, NO live-action visual carry-over from the "
-        "input video. Backgrounds must look hand-drawn, not photographed. "
-        "No frames of the output may resemble live-action footage. "
+        "images exactly for character design and color palette. No frames of "
+        "the output may resemble live-action footage. "
         f"Visual style: {style_description}."
     )
 
