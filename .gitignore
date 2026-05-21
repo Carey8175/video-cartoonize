@@ -34,3 +34,10 @@ tests/__pycache__/
 
 # 本地下载的源视频
 downloads/
+
+# 本地 deploy 工作目录里的产物 / 凭证 / 证书
+deploy/.venv/
+deploy/.ca-bundle.pem
+deploy/.zscaler-ca.pem
+deploy/.env
+deploy/config.yaml
