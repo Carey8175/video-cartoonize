@@ -49,13 +49,30 @@ class StyleDef:
     user_ref_images: List[str] = field(default_factory=list)  # user-supplied ref paths
 
 
+# ─── Whole-frame stylization clause (shared by all prompts) ───────────────────
+# 0.14.6+: I2I tends to over-apply style to salient regions (faces, characters)
+# and leave low-information regions (walls, lockers, sky) closer to the original
+# photo. This clause emphasizes that EVERY pixel must be transformed — composition
+# is preserved but rendering is uniformly cartoon.
+_UNIFORM_STYLE_CLAUSE = (
+    "Apply the cartoon rendering UNIFORMLY across the entire frame — every "
+    "character, face, clothing, AND every background element (walls, floor, "
+    "ceiling, lockers, posters, furniture, props, sky, foliage, lighting, "
+    "shadows, ambient elements). NO photorealistic textures should remain "
+    "anywhere in the image. Preserve only the COMPOSITION (camera angle, "
+    "layout, positions) — do NOT add, remove, or move any element, but every "
+    "pixel's rendering MUST match the cartoon style consistently from "
+    "foreground to background."
+)
+
+
 # ─── Prompt used when user supplies their own reference images ─────────────────
 CUSTOM_REF_PROMPT = (
     "Convert Image 1 into the same illustrated cartoon style shown in "
     "Image 2 (and Image 3 if provided). "
-    "Preserve the full scene layout, all characters, props, and background exactly. "
-    "Only the rendering style should change — do NOT add, remove, or move any element. "
-    "Match the linework quality, shading technique, and color palette of the reference style."
+    + _UNIFORM_STYLE_CLAUSE +
+    " Match the linework quality, shading technique, and color palette of the "
+    "reference style across the full frame."
 )
 
 
@@ -63,7 +80,7 @@ CUSTOM_REF_PROMPT = (
 # Rules for writing these prompts (Seedream I2I):
 #   • State the target style clearly in the first sentence
 #   • Describe linework, shading, color palette, face/eye style
-#   • Always end with "Preserve the original scene composition exactly"
+#   • Always include _UNIFORM_STYLE_CLAUSE to force background coverage
 #   • ≤150 words — I2I is anchor-driven; too-long prompts dilute attention
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -75,7 +92,7 @@ _MANHWA_PROMPT = (
     "Warm luminous skin tones, sophisticated clothing textures. "
     "Soft bokeh depth-of-field effect on the background. "
     "Clean professional linework with consistent line weight. "
-    "Preserve the original scene composition, character positions, and all props exactly."
+    + _UNIFORM_STYLE_CLAUSE
 )
 
 _ANIME_PROMPT = (
@@ -86,7 +103,7 @@ _ANIME_PROMPT = (
     "Stylized hair with strong highlight streaks and deep shadow areas. "
     "Simplified but emotionally expressive facial features. "
     "Vibrant saturated color palette. "
-    "Preserve the original scene composition, character positions, and all props exactly."
+    + _UNIFORM_STYLE_CLAUSE
 )
 
 _MANHUA_PROMPT = (
@@ -97,7 +114,7 @@ _MANHUA_PROMPT = (
     "Elaborate clothing detail and fabric texture rendering. "
     "Warm golden highlights, dramatic rim lighting. "
     "Clean professional linework. "
-    "Preserve the original scene composition, character positions, and all props exactly."
+    + _UNIFORM_STYLE_CLAUSE
 )
 
 _PIXAR_PROMPT = (
@@ -108,7 +125,7 @@ _PIXAR_PROMPT = (
     "Warm soft fill light with subtle ambient occlusion. "
     "Clean polished surfaces, slightly exaggerated proportions. "
     "Friendly family-appropriate aesthetic, high-quality render look. "
-    "Preserve the original scene composition, character positions, and all props exactly."
+    + _UNIFORM_STYLE_CLAUSE
 )
 
 _COMIC_PROMPT = (
@@ -118,7 +135,7 @@ _COMIC_PROMPT = (
     "Strong shadow contrast, limited but vivid color palette. "
     "Graphic, punchy composition with panel-ready framing. "
     "Expressive, slightly exaggerated facial features. "
-    "Preserve the original scene composition, character positions, and all props exactly."
+    + _UNIFORM_STYLE_CLAUSE
 )
 
 _NOIR_PROMPT = (
@@ -128,7 +145,7 @@ _NOIR_PROMPT = (
     "Expressive hatching and cross-hatching for texture. "
     "Cinematic, moody atmosphere reminiscent of 1940s detective comics. "
     "Bold graphic silhouettes. "
-    "Preserve the original scene composition, character positions, and all props exactly."
+    + _UNIFORM_STYLE_CLAUSE
 )
 
 
