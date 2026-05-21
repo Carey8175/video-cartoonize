@@ -79,23 +79,35 @@ def _extract_frame(clip_path: str, seek: float, dst: str) -> bool:
         return False
 
 
-def extract_sub_shot_keyframes(
+def _probe_duration(clip_path: str) -> float:
+    """ffprobe duration in seconds (0.0 on failure)."""
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", clip_path],
+            timeout=10,
+        )
+        return float(out.strip())
+    except Exception:
+        return 0.0
+
+
+def _extract_at_timestamps(
     clip_path: str,
     out_dir: str,
-    threshold: float = 27.0,
-    min_scene_len: int = DEFAULT_MIN_SCENE_LEN,
+    timestamps: List[float],
 ) -> List[Tuple[float, str]]:
-    """Extract first frame of each sub-shot, skipping blurry / overexposed frames.
+    """Extract first quality-OK frame at each requested timestamp.
 
-    对每个子镜头边界，按 NUDGE_CANDIDATES 顺序尝试 t+0.1, t+0.25, ...
-    遇到第一个通过质量检测的帧就用，全失败就用最后一次（保底有帧）。
+    Shared body of all sub-shot keyframe strategies. For each `t`, nudges
+    forward by NUDGE_CANDIDATES and picks the first sharp / well-exposed frame.
+    Returns list of (requested_t, dst_path) for frames that landed successfully.
     """
     os.makedirs(out_dir, exist_ok=True)
-    boundaries = detect_sub_shots(clip_path, threshold, min_scene_len)
     out: List[Tuple[float, str]] = []
     clip_stem = Path(clip_path).stem
 
-    for i, t in enumerate(boundaries):
+    for i, t in enumerate(timestamps):
         dst = str(Path(out_dir) / f"{clip_stem}_sub{i:02d}_t{t:.2f}.jpg")
         picked_seek: Optional[float] = None
         last_seek:   Optional[float] = None
@@ -119,3 +131,21 @@ def extract_sub_shot_keyframes(
             print(f"[sub_shot] ✗ t={t:.2f} 完全提取失败")
 
     return out
+
+
+def extract_sub_shot_keyframes(
+    clip_path: str,
+    out_dir: str,
+    threshold: float = 27.0,
+    min_scene_len: int = DEFAULT_MIN_SCENE_LEN,
+) -> List[Tuple[float, str]]:
+    """Extract first frame of each sub-shot, skipping blurry / overexposed frames.
+
+    Default (attempt 1) strategy: PySceneDetect ContentDetector at `threshold`.
+    Works well for footage with hard cuts; can under-detect on soft-cut /
+    same-scene framing changes. For retries, `cmd_poll` appends extra
+    keyframes via `_compute_topup_timestamps_floor` (attempt 2, 3s gap floor)
+    and `_compute_topup_timestamps_uniform` (attempt 3, top up to 10 frames).
+    """
+    boundaries = detect_sub_shots(clip_path, threshold, min_scene_len)
+    return _extract_at_timestamps(clip_path, out_dir, boundaries)

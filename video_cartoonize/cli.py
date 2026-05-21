@@ -260,7 +260,8 @@ def cmd_vlm(args: argparse.Namespace) -> int:
     cfg      = st.cfg_from_state(s)
     cfg.api_key = _resolve_key(cfg.api_key)
     clips    = st.clips_from_state(s)
-    style    = get_style(s["config"]["style_id"])
+    cfg_dict = s["config"]
+    style    = get_style(cfg_dict["style_id"], user_ref_paths=cfg_dict.get("ref_images") or None)
     preamble = build_preamble(style.description)
 
     clip_id  = getattr(args, "clip_id", None)
@@ -424,7 +425,8 @@ def cmd_submit(args: argparse.Namespace) -> int:
     targets  = [cl for cl in clips if clip_id is None or cl.clip_id == clip_id]
 
     ratio = s["config"].get("ratio") or detect_ratio(clips[0].resized_path)
-    style = get_style(s["config"]["style_id"])
+    cfg_dict = s["config"]
+    style = get_style(cfg_dict["style_id"], user_ref_paths=cfg_dict.get("ref_images") or None)
     preamble = build_preamble(style.description)
 
     dry_run = bool(getattr(args, "dry_run", False))
@@ -690,6 +692,206 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 VERIFY_MAX_ATTEMPTS = 3
 
+# ── 自动重试时新增关键帧的策略阈值 ──────────────────────────────────────────────
+# 尝试 2：相邻关键帧时间差 > FLOOR_GAP_SEC 就等距补齐（追加，不重画已有的）
+RETRY_FLOOR_GAP_SEC = 3.0
+# 尝试 3：把关键帧总数补齐到 UNIFORM_TARGET（追加到最大间隙的中点，重复直到达标）
+RETRY_UNIFORM_TARGET = 10
+
+
+def _parse_keyframe_timestamp(path: str) -> Optional[float]:
+    """从关键帧文件名解析时间戳。约定: `<stem>_subNN_t<sec>.jpg`。"""
+    import re
+    m = re.search(r"_t(\d+(?:\.\d+)?)\.jpg$", os.path.basename(path))
+    return float(m.group(1)) if m else None
+
+
+def _compute_topup_timestamps_floor(
+    existing_ts: List[float], duration: float, max_gap: float = RETRY_FLOOR_GAP_SEC,
+) -> List[float]:
+    """尝试 2 的时间戳规划：相邻间隔 > max_gap 时，等距补齐。
+
+    `existing_ts` + duration（视作末尾哨兵）切成区间；每段间隔 > max_gap 时，
+    插入 `floor(gap / max_gap)` 个等距点。返回**仅新增**的时间戳列表（已排序）。
+    若 existing_ts 为空，从 [0, duration] 整段算。
+    """
+    if duration <= 0:
+        return []
+    boundaries = sorted(existing_ts) if existing_ts else [0.0]
+    extras: List[float] = []
+    for i, b in enumerate(boundaries):
+        nxt = boundaries[i + 1] if i + 1 < len(boundaries) else duration
+        gap = nxt - b
+        if gap > max_gap:
+            n_extra = int(gap // max_gap)
+            step    = gap / (n_extra + 1)
+            for k in range(1, n_extra + 1):
+                t = round(b + k * step, 2)
+                # 避免和已有时间戳几乎重合
+                if all(abs(t - et) > 0.3 for et in existing_ts):
+                    extras.append(t)
+    return sorted(set(extras))
+
+
+def _compute_topup_timestamps_uniform(
+    existing_ts: List[float], duration: float, target_total: int = RETRY_UNIFORM_TARGET,
+) -> List[float]:
+    """尝试 3 的时间戳规划：贪心 farthest-point，把总数补齐到 target_total。
+
+    每轮在当前所有点（含 0 / duration 边界 + 已选点）的最大间隙中点插一个新点，
+    重复 `target_total - len(existing_ts)` 次。返回仅新增的时间戳（已排序）。
+    """
+    if duration <= 0 or target_total <= len(existing_ts):
+        return []
+    need = target_total - len(existing_ts)
+    pts  = sorted(set([0.0] + list(existing_ts) + [duration]))
+    extras: List[float] = []
+    for _ in range(need):
+        best_i = max(range(len(pts) - 1), key=lambda i: pts[i + 1] - pts[i])
+        mid    = round((pts[best_i] + pts[best_i + 1]) / 2, 2)
+        extras.append(mid)
+        pts.append(mid)
+        pts.sort()
+    return sorted(extras)
+
+
+def _upload_new_cartoons_only(
+    clip_id: int,
+    new_cartoon_paths: List[str],
+    start_index: int,
+    work_dir: str,
+    s: dict,
+) -> List[str]:
+    """TOS + Assets register for new cartoon files only (no video re-upload).
+
+    Reuses the existing `asset_group_id` from state.json. Returns asset URLs
+    ordered by index, or `[]` if any asset failed to register (caller bails
+    rather than partially appending).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from video_cartoonize.assets_setup import get_or_create_group, upload_assets
+    from video_cartoonize.tos_client import upload_file
+    date_tag = datetime.now().strftime("%Y%m%d")
+    group_id = s.get("asset_group_id") or get_or_create_group(f"cartoonize-{date_tag}")
+
+    labels  = [f"kf_{clip_id:02d}_{start_index + j:02d}" for j in range(len(new_cartoon_paths))]
+    tos_urls: Dict[str, str] = {}
+
+    def do_tos(label: str, path: str):
+        return label, upload_file(path, expires=86400)["url"]
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {
+            pool.submit(do_tos, lbl, p): lbl
+            for lbl, p in zip(labels, new_cartoon_paths)
+        }
+        for fut in as_completed(futures):
+            try:
+                label, url = fut.result()
+                tos_urls[label] = url
+            except Exception as e:
+                print(f"[TOS retry] ✗ {e}", file=sys.stderr)
+
+    items = [(lbl, "Image", tos_urls[lbl], lbl) for lbl in tos_urls]
+    asset_urls = upload_assets(group_id, items, max_workers=7)
+
+    # Ordered output; bail if anything missing (fail-fast like cmd_upload)
+    ordered: List[str] = []
+    for lbl in labels:
+        if lbl not in asset_urls:
+            return []
+        ordered.append(asset_urls[lbl])
+    return ordered
+
+
+def _regenerate_clip_for_retry(clip, work_dir: str, s: dict, cfg, strategy: str) -> bool:
+    """Append-only 关键帧扩充。已有 cartoons 和 asset URLs 不动。
+
+    strategy:
+      'with_floor' — 尝试 2：3s 时间保底，补齐间隔
+      'uniform10'  — 尝试 3：farthest-point 补齐到 10 张总数
+
+    Returns True 若至少新增了一张关键帧并完成上传。
+    """
+    from video_cartoonize import state as _st
+    from video_cartoonize.sub_shot_detect import _extract_at_timestamps, _probe_duration
+    from video_cartoonize.scene_describe import cartoonize_extra_subshot_frames
+    from video_cartoonize.styles import get_style
+
+    duration = _probe_duration(clip.resized_path)
+    if duration <= 0:
+        return False
+
+    existing_n  = len(clip.subshot_frame_paths)
+    existing_ts = sorted([
+        t for t in (_parse_keyframe_timestamp(p) for p in clip.subshot_frame_paths)
+        if t is not None
+    ])
+    # 若解析不出（不是本 CLI 抽的帧），退化为 0..duration 均匀填充入参
+    if len(existing_ts) != existing_n:
+        existing_ts = [round(duration * (i + 0.5) / max(existing_n, 1), 2)
+                       for i in range(existing_n)]
+
+    if strategy == "with_floor":
+        new_ts = _compute_topup_timestamps_floor(existing_ts, duration, max_gap=RETRY_FLOOR_GAP_SEC)
+    elif strategy == "uniform10":
+        new_ts = _compute_topup_timestamps_uniform(existing_ts, duration, target_total=RETRY_UNIFORM_TARGET)
+    else:
+        return False
+
+    if not new_ts:
+        return False  # 已经足够，不用补
+
+    kf_dir   = os.path.join(work_dir, "keyframes", f"clip_{clip.clip_id:02d}")
+    cart_dir = os.path.join(work_dir, "cartoons")
+
+    new_pairs = _extract_at_timestamps(clip.resized_path, kf_dir, new_ts)
+    if not new_pairs:
+        return False
+    new_frame_paths = [p for _, p in new_pairs]
+
+    cfg_dict = s["config"]
+    style    = get_style(cfg_dict["style_id"], user_ref_paths=cfg_dict.get("ref_images") or None)
+    new_cartoon_paths = cartoonize_extra_subshot_frames(
+        new_frame_paths=new_frame_paths,
+        out_dir=cart_dir,
+        style=style,
+        api_key=cfg.api_key,
+        clip_id=clip.clip_id,
+        start_index=existing_n,
+        model=cfg.seedream_model,
+        size=cfg.seedream_image_size,
+    )
+    if not new_cartoon_paths:
+        return False
+
+    # 上传仅新增的 cartoon 到 TOS + Assets（视频已注册过，跳过）
+    new_cartoon_urls = _upload_new_cartoons_only(
+        clip.clip_id, new_cartoon_paths, existing_n, work_dir, s,
+    )
+    if not new_cartoon_urls:
+        return False
+
+    combined_frame_paths   = list(clip.subshot_frame_paths)   + new_frame_paths
+    combined_cartoon_paths = list(clip.subshot_cartoon_paths) + new_cartoon_paths
+    combined_cartoon_urls  = list(clip.subshot_cartoon_urls)  + new_cartoon_urls
+
+    with _st.lock(work_dir):
+        s2 = _st.require(work_dir)
+        _st.merge_clip_fields(
+            s2, clip.clip_id,
+            subshot_frame_paths=combined_frame_paths,
+            subshot_cartoon_paths=combined_cartoon_paths,
+            subshot_cartoon_urls=combined_cartoon_urls,
+        )
+        _st.save(work_dir, s2)
+
+    # Sync local clip view so subsequent submit_clip sees the new image refs
+    clip.subshot_frame_paths   = combined_frame_paths
+    clip.subshot_cartoon_paths = combined_cartoon_paths
+    clip.subshot_cartoon_urls  = combined_cartoon_urls
+    return True
+
 
 def cmd_poll(args: argparse.Namespace) -> int:
     """Phase 5b/5c 一站式 — 查询 Seedance + 自动 VLM 风格校验 + 自动重试调度。
@@ -911,8 +1113,45 @@ def cmd_poll(args: argparse.Namespace) -> int:
 
             prompts_map = {int(k): v for k, v in s.get("prompts", {}).items()}
             ratio = s["config"].get("ratio") or detect_ratio(clip.resized_path)
-            style = get_style(s["config"]["style_id"])
+            cfg_dict = s["config"]
+            style = get_style(cfg_dict["style_id"], user_ref_paths=cfg_dict.get("ref_images") or None)
             preamble = build_preamble(style.description)
+
+            # ── Attempt-aware keyframe top-up (append-only, 不重画已有 cartoons) ──
+            # 尝试 2 (verify_attempts==1): 3s 时间保底，补齐间隔
+            # 尝试 3 (verify_attempts==2): 把关键帧总数补到 10
+            regen_strategy = None
+            if clip.verify_attempts == 1:
+                regen_strategy = "with_floor"
+            elif clip.verify_attempts == 2:
+                regen_strategy = "uniform10"
+            if regen_strategy:
+                n_kf_before = len(clip.subshot_cartoon_paths)
+                regen_err: Optional[str] = None
+                try:
+                    regen_ok = _regenerate_clip_for_retry(
+                        clip, work_dir, s, cfg, regen_strategy,
+                    )
+                except Exception as e:
+                    # 关键容错：Seedream / TOS / Assets / ffmpeg 任一环节抛异常
+                    # 都不应该让 poll 整体崩溃；fallthrough 用已有关键帧继续提交，
+                    # 等下一次 verify 失败再试。
+                    regen_ok  = False
+                    regen_err = f"{type(e).__name__}: {e}"
+                log_clip_event(
+                    work_dir, clip_id, "poll.retry_keyframe_topup",
+                    attempt=clip.verify_attempts + 1,
+                    strategy=regen_strategy,
+                    success=regen_ok,
+                    error=regen_err,
+                    n_keyframes_before=n_kf_before,
+                    n_keyframes_after=len(clip.subshot_cartoon_paths),
+                )
+                if regen_ok:
+                    # 重读 state 以拿到 upload 写入的新 asset URLs（局部已同步过 clip
+                    # 对象，但显式 reload 防止其他字段过期）
+                    s = st.require(work_dir)
+
             prompt = _build_final_prompt(clip, prompts_map, preamble)
             use_ref = clip.verify_attempts < 2   # 第 3 次（attempts==2 -> use_ref=False）
             mode = "image-only" if not use_ref else "video+image"
@@ -1000,8 +1239,12 @@ def cmd_poll(args: argparse.Namespace) -> int:
             return 0
 
     # ── 全量模式 (无 --clip-id): 旧行为，只查不 verify ───────────────
+    # 注意：billing.record 在这里也要写——0.14.5 之前只有单 clip 模式记账，
+    # 全量模式的 9 个 clip 第一次 succeeded 时全漏掉了 Seedance 计费。
+    from video_cartoonize import billing as _bl
     results = []
     still_running = 0
+    seen_success: set = set()  # 同一次 poll 内防重复（succeeded 状态多次 poll 都是同一条 task）
 
     for clip in targets:
         if not clip.task_id or clip.status in ("success", "failed"):
@@ -1020,7 +1263,26 @@ def cmd_poll(args: argparse.Namespace) -> int:
         api_status = r.get("status", "")
         if api_status == STATUS_SUCCEEDED:
             clip.output_url = (r.get("content") or {}).get("video_url", "")
-            clip.status     = "success"
+            # 仅在该 task_id 此前未在本进程内记过账时写入（同一 task 多次 poll
+            # 不重复计费；跨进程的去重交给上游 agent 的"看到 done 就停 poll"约定）
+            if clip.status != "success" and clip.task_id not in seen_success:
+                seen_success.add(clip.task_id)
+                usage = r.get("usage") or {}
+                # has_video_input 与 submit 时一致（submit 规则: verify_attempts < 2）
+                has_video_input = clip.verify_attempts < 2
+                _bl.record(
+                    "seedance",
+                    clip_id=clip.clip_id,
+                    model=r.get("model", ""),
+                    duration_s=int(r.get("duration", 0) or 0),
+                    resolution=r.get("resolution", ""),
+                    ratio=r.get("ratio", ""),
+                    task_id=clip.task_id,
+                    has_video_input=has_video_input,
+                    completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+                    total_tokens=int(usage.get("total_tokens", 0) or 0),
+                )
+            clip.status = "success"
         elif api_status in (STATUS_FAILED, STATUS_CANCELLED):
             clip.status = "failed"
         else:
@@ -1163,8 +1425,14 @@ def cmd_mux(args: argparse.Namespace) -> int:
     os.makedirs(cart_dir,  exist_ok=True)
     os.makedirs(final_dir, exist_ok=True)
 
+    clip_id = getattr(args, "clip_id", None)
+    targets = [c for c in clips if clip_id is None or c.clip_id == clip_id]
+    if clip_id is not None and not targets:
+        _out({"status": "error", "error_type": "ClipNotFound", "clip_id": clip_id})
+        return 1
+
     results = []
-    for clip in clips:
+    for clip in targets:
         if clip.status != "success" or not clip.output_url:
             results.append({"clip_id": clip.clip_id, "status": clip.status})
             continue
@@ -1199,8 +1467,17 @@ def cmd_mux(args: argparse.Namespace) -> int:
         results.append({"clip_id": clip.clip_id, "status": "ok",
                          "output": clip.output_path})
 
-    st.clips_to_state(s, clips)
-    st.save(work_dir, s)
+    # 字段级合并：只写本次 mux 的目标 clip 的 output_path / status，避免覆盖
+    # 其它 clip 在并行管线中刚写入的字段（单 clip 模式下尤其重要）
+    with st.lock(work_dir):
+        s2 = st.require(work_dir)
+        for clip in targets:
+            st.merge_clip_fields(
+                s2, clip.clip_id,
+                output_path=clip.output_path,
+                status=clip.status,
+            )
+        st.save(work_dir, s2)
     _out({"status": "ok", "clips": results})
     return 0
 
@@ -1477,6 +1754,7 @@ def cmd_estimate(args: argparse.Namespace) -> int:
 def cmd_update(args: argparse.Namespace) -> int:
     """从远端重跑 install.sh，把 cartoonize 升级到指定分支/tag。"""
     import shlex
+    import subprocess
 
     ref   = args.ref  or os.environ.get("VIDEO_CARTOONIZE_REF",  "main")
     repo  = args.repo or os.environ.get("VIDEO_CARTOONIZE_REPO", "Carey8175/video-cartoonize")
@@ -1618,14 +1896,19 @@ def build_parser() -> argparse.ArgumentParser:
              "或自定义 endpoint ID。默认: standard",
     )
 
-    # split / keyframes / mux / merge — 全量，无 --clip-id
+    # split / keyframes / merge — 全量，无 --clip-id
     for name, help_text in [
         ("split",     "Phase 1: 场景切分 + 缩放"),
         ("keyframes", "Phase 2a: 关键帧提取"),
-        ("mux",       "Phase 6: 下载 + 音轨合并"),
         ("merge",     "Phase 7: 拼接最终视频"),
     ]:
         _add_work_dir(sub.add_parser(name, help=help_text))
+
+    # mux — 支持 --clip-id：单 clip 重 mux 不影响其它已 mux 的 clip
+    p = sub.add_parser("mux", help="Phase 6: 下载 + 音轨合并")
+    _add_work_dir(p)
+    p.add_argument("--clip-id", type=int, default=None, metavar="N",
+                   help="只 mux 指定 clip（重生成单 clip 后用）；不填则处理全部 status=success 的 clip")
 
     # run — ★ Agent 主入口：一站式处理单 clip（cartoon+vlm 并行 → upload → submit）
     p = sub.add_parser("run",

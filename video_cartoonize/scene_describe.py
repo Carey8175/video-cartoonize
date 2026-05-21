@@ -4,7 +4,7 @@ import os
 import subprocess
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from video_cartoonize import billing
 from video_cartoonize.sub_shot_detect import extract_sub_shot_keyframes
@@ -225,3 +225,56 @@ def cartoonize_subshot_frames(
             results[j] = path
 
     return [results[j] for j in sorted(results) if results[j]]
+
+
+def cartoonize_extra_subshot_frames(
+    new_frame_paths: List[str],
+    out_dir: str,
+    style,
+    api_key: str,
+    clip_id: int,
+    start_index: int,
+    model: str = "seedream-5-0-260128",
+    size: Optional[str] = None,
+    max_workers: int = 5,
+) -> List[str]:
+    """Append-only Seedream I2I — used by `cmd_poll` for attempt-2/3 retries.
+
+    Same as `cartoonize_subshot_frames` but for *additional* frames only.
+    Writes `sub_{start_index+j:02d}_cartoon.jpg` so existing cartoons (indices
+    0..start_index-1) are never overwritten. Returns the list of newly-written
+    cartoon paths in order; failed Seedream calls are silently dropped (the
+    caller can detect a short return list and decide whether to bail).
+    """
+    style_refs = list(style.ref_images) + list(style.user_ref_images)
+    cartoon_dir = os.path.join(out_dir, f"clip_{clip_id:02d}")
+    os.makedirs(cartoon_dir, exist_ok=True)
+
+    def process_one(j: int, frame_path: str):
+        idx = start_index + j
+        cartoon_path = os.path.join(cartoon_dir, f"sub_{idx:02d}_cartoon.jpg")
+        img_bytes = _seedream_i2i(
+            frame_path=frame_path,
+            style_ref_paths=style_refs,
+            api_key=api_key,
+            prompt=style.seedream_prompt,
+            model=model,
+            size=size,
+            clip_id=clip_id,
+        )
+        if img_bytes:
+            with open(cartoon_path, "wb") as f:
+                f.write(img_bytes)
+            print(f"[Retry-Phase2b] clip {clip_id:02d} sub {idx:02d} ✓")
+            return idx, cartoon_path
+        print(f"[Retry-Phase2b] clip {clip_id:02d} sub {idx:02d} ✗ Seedream failed")
+        return idx, None
+
+    results: Dict[int, Optional[str]] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(process_one, j, p): j for j, p in enumerate(new_frame_paths)}
+        for f in as_completed(futures):
+            idx, path = f.result()
+            results[idx] = path
+
+    return [results[k] for k in sorted(results) if results[k]]
