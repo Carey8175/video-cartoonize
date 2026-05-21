@@ -42,18 +42,29 @@ DEFAULT_PRICES: dict = {
         "input_usd_per_m":  0.25,
         "output_usd_per_m": 0.50,   # 估值（公开页未单独披露 output 价）
     },
-    # Seedance 2.0 标准：with-video $4.30/M、without-video $7.00/M（官方）
+    # Seedance 2.0 标准与 Fast：单价随【输出分辨率】+【是否带 video 输入】
+    # 双因子变化，需按 resolution 分档计价。
+    # 数据来源：BytePlus ModelArk Pricing 官方页（doc 1544106，2026-05 抓取）。
+    #
+    # 老的 flat schema (`with_video_usd_per_m` / `without_video_usd_per_m`)
+    # 在 `_cost_of_record` 里保留作 fallback，老的用户覆盖文件不会被破坏。
     "dreamina-seedance-2-0-260128": {
         "type": "per_token_video",
-        "with_video_usd_per_m":    4.30,
-        "without_video_usd_per_m": 7.00,
+        "rates_by_resolution": {
+            "480p":  {"with_video": 4.30, "without_video": 7.00},
+            "720p":  {"with_video": 4.30, "without_video": 7.00},
+            "1080p": {"with_video": 4.70, "without_video": 7.70},
+        },
+        "default_resolution": "720p",
     },
-    # Seedance 2.0 Fast：with-video $3.30/M（官方资源包）；
-    # without-video 公开页未明示，按 standard 比例 (7/4.3≈1.63×) 估算
     "dreamina-seedance-2-0-fast-260128": {
         "type": "per_token_video",
-        "with_video_usd_per_m":    3.30,
-        "without_video_usd_per_m": 5.40,
+        "rates_by_resolution": {
+            # 1080p 官方未支持
+            "480p":  {"with_video": 3.30, "without_video": 5.60},
+            "720p":  {"with_video": 3.30, "without_video": 5.60},
+        },
+        "default_resolution": "720p",
     },
 }
 
@@ -130,9 +141,18 @@ def _cost_of_record(r: dict, prices: dict) -> float:
     if t == "per_token_video":
         tok = int(r.get("total_tokens", 0) or 0)
         has_video = bool(r.get("has_video_input", True))   # legacy 默认 True
-        rate = (spec.get("with_video_usd_per_m") if has_video
-                else spec.get("without_video_usd_per_m")) or 0.0
-        return round(tok * float(rate) / 1_000_000, 6)
+        key = "with_video" if has_video else "without_video"
+        # 新 schema：rates_by_resolution（首选）
+        rates = spec.get("rates_by_resolution") or {}
+        if rates:
+            resolution = (r.get("resolution") or "").strip() \
+                          or spec.get("default_resolution", "720p")
+            tier = rates.get(resolution) or rates.get(spec.get("default_resolution", "720p")) or {}
+            rate = float(tier.get(key, 0.0))
+        else:
+            # 老 flat schema：用户覆盖文件可能还沿用
+            rate = float((spec.get(f"{key}_usd_per_m") or 0.0))
+        return round(tok * rate / 1_000_000, 6)
     return 0.0
 
 
@@ -253,16 +273,25 @@ def summarize(work_dir: str) -> dict:
 
 
 def cost_usd(model: str, tokens: int, prices: Optional[dict] = None) -> float:
-    """Deprecated 兼容入口：粗略按 total_tokens 估一个值（不区分输入模态）。
+    """Deprecated 兼容入口：粗略按 total_tokens 估一个值（不区分输入模态/分辨率）。
 
-    新代码应该用 _cost_of_record() 走完整逻辑。
+    新代码应该用 _cost_of_record() 走完整逻辑，能正确按 resolution + has_video_input
+    分档计价。本函数只是为了向后兼容（无外部调用方），保底返回**默认 resolution +
+    with_video** 价位，避免静默返回 0。
     """
     p = (prices or load_prices()).get(model)
     if not isinstance(p, dict):
         return 0.0
     t = p.get("type", "")
     if t == "per_token_video":
-        return round(int(tokens) * float(p.get("with_video_usd_per_m", 0.0)) / 1_000_000, 6)
+        rates = p.get("rates_by_resolution") or {}
+        if rates:
+            default_res = p.get("default_resolution", "720p")
+            tier = rates.get(default_res) or next(iter(rates.values()), {})
+            rate = float(tier.get("with_video", 0.0))
+        else:
+            rate = float(p.get("with_video_usd_per_m", 0.0))
+        return round(int(tokens) * rate / 1_000_000, 6)
     if t == "per_token_io":
         return round(int(tokens) * float(p.get("output_usd_per_m", 0.0)) / 1_000_000, 6)
     if t == "per_image":
