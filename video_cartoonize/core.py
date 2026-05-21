@@ -94,46 +94,60 @@ def detect_ratio(video_path: str) -> str:
     return min(SUPPORTED_RATIOS.items(), key=lambda kv: abs(kv[1] - actual))[0]
 
 
-def _atempo_chain(factor: float) -> str:
-    """atempo 单滤镜只支持 0.5–2.0，超出范围需要级联。"""
-    if 0.5 <= factor <= 2.0:
-        return f"atempo={factor:.6f}"
-    parts = []
-    remaining = factor
-    while remaining < 0.5:
-        parts.append("atempo=0.5")
-        remaining /= 0.5
-    while remaining > 2.0:
-        parts.append("atempo=2.0")
-        remaining /= 2.0
-    parts.append(f"atempo={remaining:.6f}")
-    return ",".join(parts)
+def _ffprobe_fps(path: str) -> float:
+    """获取视频 fps（fallback 24.0）。r_frame_rate 形如 "24/1" 或 "30000/1001"。"""
+    try:
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=r_frame_rate",
+             "-of", "default=nw=1:nk=1", path],
+            text=True, timeout=10,
+        ).strip()
+        if "/" in out:
+            n, d = out.split("/", 1)
+            d_f = float(d)
+            return float(n) / d_f if d_f != 0 else 24.0
+        return float(out)
+    except Exception:
+        return 24.0
 
 
 def mux_original_audio(cartoon_path: str, original_path: str, out_path: str) -> bool:
-    """把原视频音轨贴回卡通化视频；若两者时长不同，按比例拉伸音频。
+    """把原视频音轨贴回卡通化视频；若两者时长不同，**拉伸视频对齐原片**。
 
-    Seedance 输出会向上取整到整数秒，可能比原片长。直接 mux 会出现尾段
-    无声/早结束，所以这里用 atempo 把音频拉伸到与画面等长。
+    0.14.8+: 之前的做法是用 atempo 缩放音频去匹配 Seedance 输出的时长，但这会带来
+    时间拉伸伪影（人声变调、长片累积漂移）。新做法是反过来——保留原音频不动，用
+    setpts 拉伸视频的播放速度，让卡通视频的时长精确匹配原片。Seedance 通常向上
+    取整到整数秒（cart_dur ≥ orig_dur），所以 factor ≤ 1，视频微微加速 5-15%，
+    动作差异几乎肉眼无感，但音频质量是无损的，长片对齐也不漂移。
+
+    setpts 只改时间戳不动帧数，会让有效 fps 偏离标准值；末尾再叠一个 fps 滤镜
+    把帧率规整化，避免下游 merge 拼接时帧率不一致。
     """
     cart_dur = _ffprobe_duration(cartoon_path)
     orig_dur = _ffprobe_duration(original_path)
 
-    # 时长差小于 50ms 直接 copy 不动音轨
+    # 时长差小于 50ms 直接 mux 不动视频
+    # 音频用 `-c:a copy` 是关键——0.14.8 的核心约束是音频 bit-for-bit 透传，
+    # 不能再走 aac 重编（即便不拉伸，重编码也会产生轻微的 lossy 漂移）
     if cart_dur and orig_dur and abs(cart_dur - orig_dur) >= 0.05:
-        factor = orig_dur / cart_dur          # < 1 表示音频要变慢（变长）
-        af = _atempo_chain(factor)
+        factor = orig_dur / cart_dur          # < 1 视频加速；> 1 视频减速
+        target_fps = _ffprobe_fps(cartoon_path)
+        # setpts 拉伸时间戳 → fps 规整化 → 输出 frames 数 = target_fps × orig_dur
+        vf = f"setpts={factor:.6f}*PTS,fps={target_fps:.6f}"
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                "-i", cartoon_path, "-i", original_path,
-               "-filter_complex", f"[1:a]{af}[a]",
-               "-map", "0:v:0", "-map", "[a]",
-               "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+               "-filter_complex", f"[0:v]{vf}[v]",
+               "-map", "[v]", "-map", "1:a:0",
+               "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+               "-c:a", "copy",
+               "-shortest",  # 兜底：万一音频比拉伸后视频还长，剪到短者
                out_path]
     else:
         cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                "-i", cartoon_path, "-i", original_path,
                "-map", "0:v:0", "-map", "1:a:0",
-               "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+               "-c:v", "copy", "-c:a", "copy",
                out_path]
     try:
         subprocess.run(cmd, check=True, timeout=120)

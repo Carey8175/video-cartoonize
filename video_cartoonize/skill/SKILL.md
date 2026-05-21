@@ -584,7 +584,13 @@ cartoonize mux --work-dir ./my_output --clip-id 3    # 0.14.6+：只 mux 指定 
 
 对每个 success 的 clip：
 1. 从 Seedance output_url 下载静音视频
-2. 用 ffmpeg 将原始 resized clip 的音轨贴回
+2. 用 ffmpeg 将卡通视频按原片时长**拉伸/压缩**（setpts + fps 规整）
+3. 直接贴回原音轨（`-c:a copy`，**bit-identical**，无重编码、无变调）
+
+> **0.14.8+ 行为变化**：之前是用 atempo 拉伸音频去匹配 Seedance 输出时长，会带来
+> 人声变调和长片累积漂移；现在改为反过来——拉伸视频（Seedance 通常向上取整到整数
+> 秒，长出 5-15%）去匹配原音频，音频保持 bit-for-bit 原样。视频微速变化对动作
+> 几乎无感，但音质和音画同步是无损的。
 
 **`--clip-id` 使用场景**（0.14.6+）：手动改单个 clip 的关键帧 / 重画 cartoon /
 重新提交 Seedance 后，只想 mux 这个 clip，不动其它已 mux 好的 clip。state 写入
