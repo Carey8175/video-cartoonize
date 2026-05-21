@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "video-cartoonize"
-version = "0.14.6"
+version = "0.14.7"
 description = "Real-video → anime/cartoon pipeline CLI"
 readme = "README.md"
 requires-python = ">=3.9"
