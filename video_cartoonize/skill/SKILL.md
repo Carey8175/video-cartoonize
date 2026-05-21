@@ -492,7 +492,16 @@ Seedance 一般每个 clip 需 2–5 分钟，10 个 clip 约 10–20 分钟。
 cartoonize verify --work-dir ./my_output
 ```
 
-让 VLM 看一遍 Seedance 生成的视频，判断是不是动漫/卡通风格：
+让 VLM 看一遍 Seedance 生成的视频，**三轴**判断是不是动漫/卡通风格
+（0.14.6+）：
+
+- `characters_anime` — 角色（人脸/服装）是否卡通化
+- `backgrounds_anime` — 背景（墙、地板、家具、道具、天空、植物）是否卡通化
+- `has_live_action` — 是否存在真人/真实纹理残留
+
+**通过**需要 `characters_anime=true AND backgrounds_anime=true AND has_live_action=false`。
+失败时 `verify_reason` 前面会带 `[<failed_axis>...]` 标签，例如
+`[background_not_anime] hallway walls remain photographic`，方便排错。
 
 - **通过** → `style_verified=true`，进入下一步
 - **不通过** 且 `verify_attempts < 3` → 清除 `task_id`、status 置回 `pending`，
