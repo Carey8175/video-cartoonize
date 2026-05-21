@@ -137,6 +137,18 @@ Phase 2a 提取的关键帧（子镜头首帧 + 片尾帧）直接影响 Seedrea
 - 每个 clip 至少有 1 帧
 - 如果关键帧太少/太多，调整 `--subshot-threshold`（默认 27.0，越低越多）
 
+> **0.14.6+**：PySceneDetect 对 K-Drama 软切 / 单场景长镜头普遍欠采样（同景别
+> 复用 + 同色调 = 帧间 HSV 差值低于阈值）。verify 失败时 `cartoonize poll` 会
+> **自动 append 关键帧**：attempt 2 用 3s 时间保底补齐间隔，attempt 3 把总数补到
+> 10 张。**不重画已有 cartoon**，只对新增帧调 Seedream，成本可控。
+
+### #4 — poll 在 verify 失败时会变慢（0.14.6+）
+
+之前 `cartoonize poll --clip-id N` 是秒级返回；从 0.14.6 起，若 verify 失败触发
+attempt 2 / 3 自动重试，poll 会**同步**跑 ffmpeg 抽新帧 + Seedream I2I 画新帧 +
+TOS/Assets 上传，单次调用可能 30-90s。`while ! cartoonize poll; do sleep 30; done`
+循环仍然正常工作，只是某一次会停顿一下。
+
 ---
 
 ## Runbook — 逐步执行
@@ -491,15 +503,29 @@ cartoonize verify --work-dir ./my_output
   都保留为最后一次的结果，status=success 不变，仅 `style_verified=false`。
   mux 时仍会处理（用最后一次的视频作兜底）
 
-**🎯 提交策略（cmd_submit 自动切换）：**
+**🎯 提交策略 + 关键帧补齐（0.14.6+，poll 自动调度）：**
 
-| 重试次数 | 模式 | 输入 | 适用场景 |
-|---------|------|------|---------|
-| 第 1 次（attempts=0）| `video+image` | 原视频 + cartoon key frames | 默认模式，动作参考最强 |
-| 第 2 次（attempts=1）| `video+image` | 同上 | 第 1 次失败，可能是偶然，重试 |
-| **第 3 次（attempts=2）**| **`image-only`** | **只传 key frames，不传原视频** | 前两次都被原视频污染，甩掉原视频靠 timeline + key frames 重建 |
+每次 verify 失败后，`cartoonize poll` 在内部 resubmit 之前会**先按 append-only 策略
+补齐关键帧**——已有的 cartoon 帧和 asset URLs 全部保留，只画/上传新增的那几张。
+
+| 重试次数 | 关键帧动作 | Seedance 模式 | 输入 |
+|---------|-----------|--------------|------|
+| 第 1 次（attempts=0）| 用 `cartoonize keyframes` 阶段抽出的默认帧 | `video+image` | 原视频 + cartoon key frames |
+| 第 2 次（attempts=1）| **3s 时间保底**：相邻关键帧间隔 > 3s 就等距补一帧（如间隔 9s → 补 2 帧）。**仅新增帧走 Seedream**，已有 cartoon 不动 | `video+image` | 原视频 + 补齐后的 cartoon key frames |
+| **第 3 次（attempts=2）**| **均匀补齐到 10 张**：贪心 farthest-point，把总数补到 10。**只新增不重画** | **`image-only`** | **只传 key frames（10 张），不传原视频** |
+
+设计原则：失败往往是因为关键帧覆盖不到位（PySceneDetect 对 K-Drama 软切失效、单
+场景长镜头采样太稀）。每多一次重试就增加一道关键帧密度，给 Seedance 更强的时间
+轴锚点。append-only 让重试成本可控（attempt 2 通常加 1-3 张 Seedream，~$0.04-0.11；
+attempt 3 加 5-8 张到 10 张总数，~$0.18-0.28）。
 
 submit 输出的 JSON 会带 `"mode": "video+image"` / `"image-only"`，agent 可以看到当前用的哪种模式。
+poll 在补齐时会在事件日志写 `poll.retry_keyframe_topup`，含 `strategy`（`with_floor` / `uniform10`）、
+`n_keyframes_before` / `n_keyframes_after`。
+
+**调优参数（cli.py 顶部常量，未来若需可挪到 init flags）：**
+- `RETRY_FLOOR_GAP_SEC = 3.0` — attempt 2 的时间保底阈值
+- `RETRY_UNIFORM_TARGET = 10` — attempt 3 的总帧数目标
 
 每个 clip 在 state.json 里的 `attempts` 字段记录所有历次结果：
 ```json
@@ -527,23 +553,33 @@ submit 输出的 JSON 会带 `"mode": "video+image"` / `"image-only"`，agent �
 }
 ```
 
-**Agent 重试循环（必须实现）：**
+**Agent 不需要手动实现重试循环。**
 
-> ⚠️ verify 重试逻辑由 Step 2b–5a 的"流水线 + 收割"调度负责。**绝不要**在这里写
-> `until cartoonize poll; do sleep 30; done` 的死循环——那会让 agent 完全闲置。
-> 正确做法见上面的调度伪代码：poll 是一次性非阻塞调用，每隔 30s 唤醒一次即可。
+> ⚠️ 从 0.14.6 起 verify 重试全部封装在 `cartoonize poll --clip-id N` 内部：
+> 1) Seedance 状态查询 → 2) 自动 VLM 校验 → 3) 失败时按 attempt 调度关键帧 append
+> （3s floor / 10 张 uniform）→ 4) 重画新增 cartoon + 重传 Assets → 5) 自动
+> resubmit Seedance（attempt 3 切 image-only）→ 6) 3 次都失败用最后一次作 fallback。
+>
+> Agent 唯一要做的是 **`cartoonize poll --clip-id N` exit 0 = done，exit 1 = sleep 30s 再来一次**。
+> 见 Step 2b–5a 的调度伪代码：poll 是一次性非阻塞调用，每隔 30s 唤醒一次即可
+> （0.14.6+ 在触发 append 时单次 poll 可能停顿 30-90s 做 Seedream，属于正常）。
 
 ---
 
 ### Step 6 — 下载 + 合并原始音轨
 
 ```bash
-cartoonize mux --work-dir ./my_output
+cartoonize mux --work-dir ./my_output                # 全量：处理所有 status=success 的 clip
+cartoonize mux --work-dir ./my_output --clip-id 3    # 0.14.6+：只 mux 指定 clip
 ```
 
 对每个 success 的 clip：
 1. 从 Seedance output_url 下载静音视频
 2. 用 ffmpeg 将原始 resized clip 的音轨贴回
+
+**`--clip-id` 使用场景**（0.14.6+）：手动改单个 clip 的关键帧 / 重画 cartoon /
+重新提交 Seedance 后，只想 mux 这个 clip，不动其它已 mux 好的 clip。state 写入
+也改成了字段级合并（`merge_clip_fields`），不会覆盖其它 clip 的字段。
 
 输出：
 ```json
@@ -621,13 +657,17 @@ cartoonize status --work-dir ./my_output
 
 | 现象 | 阶段 | 处理方法 |
 |------|------|---------|
-| 子镜头未检测到 | keyframes | 降低 `--subshot-threshold`（试 20.0），重新 init + split + keyframes |
+| 子镜头未检测到 | keyframes | 降低 `--subshot-threshold`（试 20.0），重新 init + split + keyframes。**注意**：对 K-Drama 软切场景调阈值帮助有限，让 poll 的 0.14.6 自动 append 机制兜底更稳妥 |
 | 关键帧太多/误检 | keyframes | 升高 `--subshot-threshold`（试 30.0） |
+| verify 反复失败因关键帧覆盖差 | poll | **0.14.6+** poll 在 attempt 2/3 自动 append；如果还想手动加，编辑 state.json 的 `subshot_frame_paths` 并清空 `subshot_cartoon_urls`，然后 `cartoon --clip-id N` + `upload --clip-id N` + `submit --clip-id N` |
 | Seedream 风格不准 | cartoon | 用 `--style custom --ref-images` 提供更强参考图 |
 | Seedream 返回 404 | cartoon | 检查 model 是否用 date-stamped 版本 `seedream-5-0-260128` |
+| Seedream `InputImageSensitiveContentDetected` | cartoon | 个别关键帧因人像/敏感元素被拦截，函数会跳过失败帧并打印 `✗ Seedream failed`，state 只记录成功的；换帧重抽（手动调时间戳）或接受短缺 |
 | HTTP 400 `InputVideoSensitiveContentDetected` | submit | 视频未走 Assets API，重跑 `upload` |
 | HTTP 400 `InputImageSensitiveContentDetected` | submit | 卡通帧未走 Assets API，重跑 `upload` |
 | assets_active < tos_uploaded | upload | 有 asset 超时，重跑 `upload`（幂等） |
 | Seedance 输出无声 | mux | 正常，`mux` 会贴音轨 |
+| 单个 clip 重做后 mux 想只刷它 | mux | **0.14.6+** 用 `cartoonize mux --clip-id N`，不影响其它 clip 的 state |
 | poll 一直 exit 1 | poll | 检查 `cartoonize status` 看是否有 failed，failed 的 clip 不影响 poll 完成 |
+| `cartoonize billing` Seedance 显示 $0 | billing | **0.14.5 之前**全量 `cartoonize poll`（不带 `--clip-id`）不记 Seedance 用量；**0.14.6** 已修复。老项目无法回填，新提交的任务都会计入 |
 | 最终视频片段数少于预期 | merge | 部分 clip failed，检查 status 看原因 |
