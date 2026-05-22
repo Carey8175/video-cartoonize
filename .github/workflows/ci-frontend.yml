@@ -1,0 +1,60 @@
+name: CI · Frontend
+
+on:
+  push:
+    branches: [feat/console-frontend]
+    paths: ["src/**", ".github/workflows/ci-frontend.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["src/**"]
+
+jobs:
+  test:
+    name: Vitest · Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ["20", "22"]
+
+    defaults:
+      run:
+        working-directory: src
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: src/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Upload coverage
+        if: matrix.node == '20'
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-coverage
+          path: src/coverage/lcov.info
+          retention-days: 7
+
+  build:
+    name: Vite build check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: src/package-lock.json
+      - run: npm ci
+      - run: npm run build
