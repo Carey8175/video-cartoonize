@@ -75,13 +75,14 @@ export function StageMerge({ state, setState }) {
   const doneAll = clips.every((c) => c.status === 'done');
   const totalDur = clips.reduce((a, c) => a + c.duration_s, 0);
   const [merging, setMerging] = useState(false);
-  const [merged, setMerged] = useState(state.merged || false);
+  // Derive from parent state so external triggers (e.g. Clip Board onMerge)
+  // are reflected here without requiring a local copy.
+  const merged = state.merged || false;
 
   function runMerge() {
     setMerging(true);
     setTimeout(() => {
       setMerging(false);
-      setMerged(true);
       setState((s) => ({ ...s, merged: true }));
     }, 2400);
   }

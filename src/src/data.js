@@ -82,10 +82,12 @@ function makeClips() {
     const dur = +(3.6 + r() * 7).toFixed(2);
     const n_sub = 1 + Math.floor(r() * 3);
     const subshots = [];
+    // cartoon path is only present once Seedream I2I has actually run
+    const hasCartoon = ['cartoon_ready', 'polling', 'done'].includes(status);
     for (let j = 0; j < n_sub; j++) {
       subshots.push({
         idx: j,
-        cartoon: CARTOON_THUMBS[(i * 3 + j) % CARTOON_THUMBS.length],
+        cartoon: hasCartoon ? CARTOON_THUMBS[(i * 3 + j) % CARTOON_THUMBS.length] : null,
         keyframe: CARTOON_THUMBS[(i * 3 + j + 1) % CARTOON_THUMBS.length],
         t_start: +(j * (dur / n_sub)).toFixed(2),
         t_end: +(((j + 1) * dur) / n_sub).toFixed(2),
