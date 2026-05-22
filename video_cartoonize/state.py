@@ -9,6 +9,8 @@ State schema 版本管理:
   v1: 初始版本
   v2: 新增 clip.attempts[]、clip.style_verified、clip.verify_attempts、verify_reason
   v3: 新增 clip.subshot_cartoon_urls、prompts dict、clip_asset_urls dict
+  v4: 移除 state.config.api_key 明文 key
+  v5: 新增 characters 列表（主角/配角识别结果）+ char_keyframe_map（per-keyframe 角色映射）
 """
 import fcntl
 import json
@@ -27,7 +29,7 @@ LOCK_FILE  = ".state.lock"
 
 # 当前 state schema 版本。改 ClipInfo 字段或 state 顶层结构时 +1，
 # 并加一个 _migrate_vN_to_vN1 函数。
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 def path(work_dir: str) -> str:
@@ -67,6 +69,7 @@ def _migrate(state: dict, path: str) -> dict:
         1: _migrate_v1_to_v2,
         2: _migrate_v2_to_v3,
         3: _migrate_v3_to_v4,
+        4: _migrate_v4_to_v5,
     }
     while v < CURRENT_SCHEMA_VERSION:
         state = migrations[v](state)
@@ -128,6 +131,17 @@ def _migrate_v3_to_v4(state: dict) -> dict:
                 "🔒 已从 state.json 移除明文 API key（v3 历史遗留）。"
                 "后续运行从 ARK_API_KEY 环境变量或 ~/.config/video-cartoonize/ark_api_key.txt 读取。"
             )
+    return state
+
+
+def _migrate_v4_to_v5(state: dict) -> dict:
+    """v4 → v5: 新增 characters 列表 + char_keyframe_map。
+
+    两个字段均为空（由 cartoonize identify / keyframes 步骤填充），
+    旧 state.json 迁移时补上空初值即可。
+    """
+    state.setdefault("characters", [])
+    state.setdefault("char_keyframe_map", {})
     return state
 
 

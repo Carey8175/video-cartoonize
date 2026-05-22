@@ -32,6 +32,9 @@ tests/*.json
 tests/clip_*_failures/
 tests/__pycache__/
 
+# 非项目代码：prototype / 一次性测试脚本 + 产物（不入库）
+.test/
+
 # 本地下载的源视频
 downloads/
 

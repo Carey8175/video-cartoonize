@@ -205,11 +205,154 @@ def cmd_keyframes(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_identify(args: argparse.Namespace) -> int:
+    """Phase 2a-opt — 人物识别：检测主角/配角，写入 state.json characters 字段。
+
+    依赖 InsightFace (buffalo_l)，首次运行会自动下载 ~300MB 模型。
+    keyframes 步骤之前或之后均可运行；char-refs 必须在 identify 之后。
+    """
+    from video_cartoonize import state as st
+    from video_cartoonize.character import identify_characters, map_keyframes_to_characters
+
+    work_dir = _work_dir(args)
+    s        = st.require(work_dir)
+    clips    = st.clips_from_state(s)
+
+    video_path = s.get("input_video", "")
+    if not video_path or not os.path.exists(video_path):
+        _out({"status": "error",
+              "message": f"input_video '{video_path}' not found — re-run cartoonize init"})
+        return 1
+
+    from video_cartoonize.character import (
+        SAMPLE_FPS, CLUSTER_THRESHOLD, MIN_DET_SCORE,
+        PROTAGONIST_FREQ_DEFAULT, SUPPORTING_FREQ_DEFAULT, MATCH_THRESHOLD,
+    )
+
+    fps             = getattr(args, "fps",              SAMPLE_FPS)
+    cl_thresh       = getattr(args, "cluster_threshold", CLUSTER_THRESHOLD)
+    det_score       = getattr(args, "min_det_score",    MIN_DET_SCORE)
+    prot_freq       = getattr(args, "protagonist_freq", PROTAGONIST_FREQ_DEFAULT)
+    supp_freq       = getattr(args, "supporting_freq",  SUPPORTING_FREQ_DEFAULT)
+    match_thresh    = getattr(args, "match_threshold",  MATCH_THRESHOLD)
+
+    # Step 1: identify characters from raw video
+    characters = identify_characters(
+        video_path=video_path,
+        work_dir=work_dir,
+        fps=fps,
+        cluster_threshold=cl_thresh,
+        min_det_score=det_score,
+        protagonist_freq=prot_freq,
+        supporting_freq=supp_freq,
+    )
+
+    # Step 2: map each keyframe to matched characters (runs only if keyframes exist)
+    char_kf_map = {}
+    any_keyframes = any(cl.subshot_frame_paths for cl in clips)
+    if any_keyframes:
+        char_kf_map = map_keyframes_to_characters(
+            work_dir=work_dir,
+            characters=characters,
+            clips=clips,
+            min_det_score=det_score,
+            match_threshold=match_thresh,
+        )
+    else:
+        print("[Identify] No keyframes extracted yet — run 'cartoonize keyframes' "
+              "then re-run 'cartoonize identify' to get char_keyframe_map")
+
+    # Persist to state
+    with st.lock(work_dir):
+        s2 = st.require(work_dir)
+        s2["characters"]        = characters
+        s2["char_keyframe_map"] = char_kf_map
+        st.save(work_dir, s2)
+
+    n_prot = sum(1 for c in characters if c["role"] == "protagonist")
+    n_supp = sum(1 for c in characters if c["role"] == "supporting")
+    _out({
+        "status":          "ok",
+        "protagonists":    n_prot,
+        "supporting":      n_supp,
+        "total_chars":     len(characters),
+        "kf_mapped_clips": len(char_kf_map),
+        "characters":      [
+            {"char_id": c["char_id"], "role": c["role"],
+             "freq": c["freq"], "face_ref": c["face_ref"]}
+            for c in characters
+        ],
+    })
+    return 0
+
+
+def cmd_char_refs(args: argparse.Namespace) -> int:
+    """Phase 2a-opt — 生成动漫角色参考图：对每个主角/配角的真人脸 Seedream I2I。
+
+    必须在 identify 之后运行（需要 state.json characters 字段）。
+    生成结果写入 work_dir/characters/char_NN_anime.jpg 并更新 state.json。
+    之后 cartoon 阶段会自动把角色动漫 ref 注入对应 keyframe 的 Seedream 调用。
+    """
+    from video_cartoonize import state as st
+    from video_cartoonize.styles import get_style
+    from video_cartoonize.character import generate_anime_refs
+
+    work_dir = _work_dir(args)
+    s        = st.require(work_dir)
+    cfg      = st.cfg_from_state(s)
+    cfg.api_key = _resolve_key(cfg.api_key)
+
+    characters = s.get("characters", [])
+    if not characters:
+        _out({"status": "error",
+              "message": "No characters found — run 'cartoonize identify' first"})
+        return 1
+
+    n_targets = sum(1 for c in characters
+                    if c["role"] in ("protagonist", "supporting"))
+    if n_targets == 0:
+        _out({"status": "ok", "message": "No protagonists or supporting found",
+              "generated": 0})
+        return 0
+
+    cfg_d  = s["config"]
+    style  = get_style(cfg_d["style_id"],
+                       user_ref_paths=cfg_d.get("ref_images") or None)
+
+    updated = generate_anime_refs(
+        work_dir=work_dir,
+        characters=characters,
+        style=style,
+        api_key=cfg.api_key,
+        model=cfg.seedream_model,
+        size=cfg.seedream_image_size,
+    )
+
+    with st.lock(work_dir):
+        s2 = st.require(work_dir)
+        s2["characters"] = updated
+        st.save(work_dir, s2)
+
+    n_ok = sum(1 for c in updated if c.get("anime_ref"))
+    _out({
+        "status":    "ok",
+        "generated": n_ok,
+        "total":     len(updated),
+        "characters": [
+            {"char_id": c["char_id"], "role": c["role"],
+             "anime_ref": c.get("anime_ref")}
+            for c in updated
+        ],
+    })
+    return 0
+
+
 def cmd_cartoon(args: argparse.Namespace) -> int:
     """Phase 2b — Seedream I2I 卡通化关键帧（--clip-id 指定单个 clip）。"""
     from video_cartoonize import state as st
     from video_cartoonize.scene_describe import cartoonize_subshot_frames
     from video_cartoonize.styles import get_style
+    from video_cartoonize.character import resolve_keyframe_char_refs
 
     work_dir = _work_dir(args)
     s        = st.require(work_dir)
@@ -223,8 +366,31 @@ def cmd_cartoon(args: argparse.Namespace) -> int:
     clip_id  = getattr(args, "clip_id", None)
     targets  = [cl for cl in clips if clip_id is None or cl.clip_id == clip_id]
 
+    # 0.14.10+: per-frame character refs (if identify + char-refs were run)
+    characters        = s.get("characters", [])
+    char_keyframe_map = s.get("char_keyframe_map", {})
+    has_char_refs     = any(c.get("anime_ref") for c in characters)
+    if has_char_refs:
+        print(f"[Cartoon] Character consistency mode: "
+              f"{sum(1 for c in characters if c.get('anime_ref'))} anime refs available")
+
     summary = []
     for clip in targets:
+        # Build extra_refs_per_frame from character mapping
+        extra_refs: Optional[List[List[str]]] = None
+        if has_char_refs and characters:
+            extra_refs = [
+                resolve_keyframe_char_refs(
+                    clip.clip_id, kf_idx,
+                    characters, char_keyframe_map,
+                )
+                for kf_idx in range(len(clip.subshot_frame_paths))
+            ]
+            n_with_refs = sum(1 for r in extra_refs if r)
+            if n_with_refs:
+                print(f"[Cartoon] clip {clip.clip_id:02d}: "
+                      f"{n_with_refs}/{len(clip.subshot_frame_paths)} keyframes have char refs")
+
         clip.subshot_cartoon_paths = cartoonize_subshot_frames(
             frame_paths=clip.subshot_frame_paths,
             out_dir=cart_dir,
@@ -234,6 +400,7 @@ def cmd_cartoon(args: argparse.Namespace) -> int:
             model=cfg.seedream_model,
             size=cfg.seedream_image_size,
             max_workers=5,
+            extra_refs_per_frame=extra_refs,
         )
         summary.append({"clip_id": clip.clip_id,
                          "cartoons": len(clip.subshot_cartoon_paths),
@@ -1904,6 +2071,32 @@ def build_parser() -> argparse.ArgumentParser:
     ]:
         _add_work_dir(sub.add_parser(name, help=help_text))
 
+    # identify — 人物识别（主角/配角/路人）
+    p = sub.add_parser(
+        "identify",
+        help="Phase 2a-opt: 人物识别（InsightFace）→ 主角/配角/路人分类 + keyframe 角色映射",
+    )
+    _add_work_dir(p)
+    p.add_argument("--fps",              type=float, default=0.5,
+                   help="采样帧率（default 0.5，降低可加速但可能漏检）")
+    p.add_argument("--cluster-threshold", type=float, default=0.55,
+                   help="InsightFace 聚类余弦距离阈值（default 0.55，越低越严格）")
+    p.add_argument("--min-det-score",    type=float, default=0.72,
+                   help="人脸检测最低置信度（default 0.72，过滤侧脸/模糊帧）")
+    p.add_argument("--protagonist-freq", type=float, default=0.10,
+                   help="主角频率下限（default 0.10 = 出现在 ≥10%% 帧里）")
+    p.add_argument("--supporting-freq",  type=float, default=0.04,
+                   help="配角频率下限（default 0.04）")
+    p.add_argument("--match-threshold",  type=float, default=0.50,
+                   help="keyframe 角色匹配余弦距离阈值（default 0.50）")
+
+    # char-refs — 生成角色动漫参考图
+    p = sub.add_parser(
+        "char-refs",
+        help="Phase 2a-opt: Seedream I2I 生成主角/配角动漫参考图（需先 identify）",
+    )
+    _add_work_dir(p)
+
     # mux — 支持 --clip-id：单 clip 重 mux 不影响其它已 mux 的 clip
     p = sub.add_parser("mux", help="Phase 6: 下载 + 音轨合并")
     _add_work_dir(p)
@@ -2004,6 +2197,8 @@ def main() -> int:
         "init":      cmd_init,
         "split":     cmd_split,
         "keyframes": cmd_keyframes,
+        "identify":  cmd_identify,
+        "char-refs": cmd_char_refs,
         "cartoon":   cmd_cartoon,
         "vlm":       cmd_vlm,
         "upload":    cmd_upload,

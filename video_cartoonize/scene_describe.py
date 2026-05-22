@@ -192,17 +192,29 @@ def cartoonize_subshot_frames(
     model: str = "seedream-5-0-260128",
     size: Optional[str] = None,
     max_workers: int = 5,
+    extra_refs_per_frame: Optional[List[List[str]]] = None,
 ) -> List[str]:
-    """Phase 2b — Seedream I2I on every key frame for one clip (concurrent)."""
-    style_refs = list(style.ref_images) + list(style.user_ref_images)
+    """Phase 2b — Seedream I2I on every key frame for one clip (concurrent).
+
+    extra_refs_per_frame (0.14.10+):
+      Optional list of per-frame extra reference image paths, indexed by frame
+      position (same length as frame_paths).  When provided, frame j's Seedream
+      call receives `style_refs + extra_refs_per_frame[j]` as image references,
+      allowing per-keyframe character consistency anchoring.
+    """
+    style_refs  = list(style.ref_images) + list(style.user_ref_images)
     cartoon_dir = os.path.join(out_dir, f"clip_{clip_id:02d}")
     os.makedirs(cartoon_dir, exist_ok=True)
 
     def process_one(j: int, frame_path: str):
         cartoon_path = os.path.join(cartoon_dir, f"sub_{j:02d}_cartoon.jpg")
+        # Merge global style refs with per-frame character refs (if any)
+        frame_refs = style_refs.copy()
+        if extra_refs_per_frame and j < len(extra_refs_per_frame):
+            frame_refs = frame_refs + extra_refs_per_frame[j]
         img_bytes = _seedream_i2i(
             frame_path=frame_path,
-            style_ref_paths=style_refs,
+            style_ref_paths=frame_refs,
             api_key=api_key,
             prompt=style.seedream_prompt,
             model=model,
@@ -212,7 +224,9 @@ def cartoonize_subshot_frames(
         if img_bytes:
             with open(cartoon_path, "wb") as f:
                 f.write(img_bytes)
-            print(f"[Phase 2b] clip {clip_id:02d} sub {j:02d} ✓")
+            has_char = bool(extra_refs_per_frame and extra_refs_per_frame[j])
+            suffix   = " [+char_ref]" if has_char else ""
+            print(f"[Phase 2b] clip {clip_id:02d} sub {j:02d} ✓{suffix}")
             return j, cartoon_path
         print(f"[Phase 2b] clip {clip_id:02d} sub {j:02d} ✗ Seedream failed")
         return j, None
