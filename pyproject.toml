@@ -13,8 +13,28 @@ dependencies = [
     "opencv-python",
     "tos",
     "Pillow",
-    "truststore;python_version>='3.10'",  # 用系统 keychain 解决公司 MITM 证书
-    "certifi",                              # fallback CA bundle
+    "truststore;python_version>='3.10'",
+    "certifi",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "sqlalchemy[asyncio]>=2.0",
+    "aiosqlite>=0.20",
+    "asyncpg>=0.29",
+    "redis[hiredis]>=5.0",
+    "httpx>=0.27",
+]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "anyio[trio]>=4.0",
+    "httpx>=0.27",
+    "aiosqlite>=0.20",
 ]
 
 [project.scripts]
@@ -26,3 +46,11 @@ include = ["video_cartoonize*"]
 
 [tool.setuptools.package-data]
 video_cartoonize = ["style_refs/**/*", "skill/**/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"

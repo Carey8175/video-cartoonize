@@ -1983,7 +1983,48 @@ def build_parser() -> argparse.ArgumentParser:
     _add_work_dir(p)
     p.add_argument("--json", action="store_true", help="输出原始 JSON")
 
+    # serve — Console API server
+    p = sub.add_parser("serve", help="启动 Cartoonize Console API server")
+    p.add_argument("--host",       default="127.0.0.1", help="绑定地址（默认 127.0.0.1）")
+    p.add_argument("--port",       type=int, default=7317, help="端口（默认 7317）")
+    p.add_argument("--work-root",  default=None, help="project work_dir 的根目录（默认 ~/cartoonize）")
+    p.add_argument("--db",         default=None, metavar="DATABASE_URL", help="数据库 URL（默认 SQLite）")
+    p.add_argument("--redis",      default=None, metavar="REDIS_URL",    help="Redis URL（默认 redis://localhost:6379/0）")
+    p.add_argument("--no-redis",   action="store_true", help="禁用 Redis（降级为无 SSE 广播模式）")
+    p.add_argument("--reload",     action="store_true", help="开发模式：文件变更自动重载")
+
     return root
+
+
+def cmd_serve(args) -> int:
+    """启动 FastAPI + Uvicorn server。"""
+    import os
+    # 把 CLI 参数写入环境变量，供 pydantic-settings 读取
+    if args.work_root:
+        os.environ["WORK_ROOT"] = args.work_root
+    if args.db:
+        os.environ["DATABASE_URL"] = args.db
+    if args.redis:
+        os.environ["REDIS_URL"] = args.redis
+    if getattr(args, "no_redis", False):
+        os.environ["REDIS_ENABLED"] = "false"
+
+    try:
+        import uvicorn
+    except ImportError:
+        raise SystemExit(
+            "uvicorn not installed. Run: pip install 'video-cartoonize[server]'"
+        )
+
+    uvicorn.run(
+        "video_cartoonize.server.main:create_app",
+        factory=True,
+        host=args.host,
+        port=args.port,
+        reload=getattr(args, "reload", False),
+        log_level="info",
+    )
+    return 0
 
 
 def main() -> int:
@@ -2027,6 +2068,9 @@ def main() -> int:
         from video_cartoonize.styles import list_styles
         print(list_styles())
         return 0
+
+    if args.cmd == "serve":
+        return cmd_serve(args)
 
     fn = dispatch.get(args.cmd)
     if fn is None:

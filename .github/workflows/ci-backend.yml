@@ -1,0 +1,61 @@
+name: CI · Backend
+
+on:
+  push:
+    branches: [feat/console-backend]
+    paths:
+      - "video_cartoonize/server/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/ci-backend.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "video_cartoonize/server/**"
+      - "tests/**"
+
+jobs:
+  lint:
+    name: Ruff lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      - run: ruff check video_cartoonize/server/ tests/
+
+  test:
+    name: pytest · Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install package + test deps
+        run: pip install -e ".[server,test]"
+
+      - name: Run tests
+        run: pytest tests/server/ -v --tb=short
+
+      - name: Upload coverage (Python 3.11 only)
+        if: matrix.python == '3.11'
+        run: |
+          pip install pytest-cov
+          pytest tests/server/ --cov=video_cartoonize/server --cov-report=xml -q
+      - uses: actions/upload-artifact@v4
+        if: matrix.python == '3.11'
+        with:
+          name: backend-coverage
+          path: coverage.xml
+          retention-days: 7
