@@ -13,8 +13,22 @@ dependencies = [
     "opencv-python",
     "tos",
     "Pillow",
-    "truststore;python_version>='3.10'",  # 用系统 keychain 解决公司 MITM 证书
-    "certifi",                              # fallback CA bundle
+    "truststore;python_version>='3.10'",
+    "certifi",
+]
+
+[project.optional-dependencies]
+# 安装服务端：pip install -e ".[server]"
+server = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "sqlalchemy[asyncio]>=2.0",
+    "aiosqlite>=0.20",          # SQLite 本地开发
+    "asyncpg>=0.29",            # PostgreSQL 生产
+    "redis[hiredis]>=5.0",
+    "httpx>=0.27",              # ARK key 校验
 ]
 
 [project.scripts]
