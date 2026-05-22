@@ -344,53 +344,61 @@ def generate_anime_refs(
     api_key: str,
     model: str = "seedream-5-0-260128",
     size: Optional[str] = None,
+    max_workers: int = 5,
 ) -> List[Dict]:
     """
     Run Seedream I2I to create an anime-style reference image for each
-    protagonist / supporting character.
+    protagonist / supporting character — concurrently (default 5 threads).
 
     Updates each character dict in-place (sets anime_ref) and returns the
     updated list. Records billing via billing.record().
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from video_cartoonize.scene_describe import _seedream_i2i
 
-    chars_dir   = os.path.join(work_dir, "characters")
-    style_refs  = list(style.ref_images) + list(style.user_ref_images)
+    chars_dir  = os.path.join(work_dir, "characters")
+    style_refs = list(style.ref_images) + list(style.user_ref_images)
 
-    updated = []
-    for c in characters:
-        face_ref = c.get("face_ref", "")
-        if not face_ref or not os.path.exists(face_ref):
-            print(f"[CharRefs] #{c['char_id']:02d} no face_ref — skipping")
-            updated.append(c)
-            continue
+    # Separate chars with valid face_ref from those without
+    to_process = [c for c in characters if c.get("face_ref") and os.path.exists(c["face_ref"])]
+    skipped    = [c for c in characters if c not in to_process]
+    for c in skipped:
+        print(f"[CharRefs] #{c['char_id']:02d} no face_ref — skipping")
 
+    def _process_one(c: Dict) -> Dict:
         anime_path = os.path.join(chars_dir, f"char_{c['char_id']:02d}_anime.jpg")
-        print(f"[CharRefs] #{c['char_id']:02d} {c['role']:<12} → {os.path.basename(anime_path)} ...",
-              end="", flush=True)
-
-        img_bytes = _seedream_i2i(
-            frame_path=face_ref,
+        img_bytes  = _seedream_i2i(
+            frame_path=c["face_ref"],
             style_ref_paths=style_refs,
             api_key=api_key,
             prompt=style.seedream_prompt,
             model=model,
             size=size,
-            clip_id=c["char_id"],   # reuse clip_id slot for billing label
+            clip_id=c["char_id"],
         )
         if img_bytes:
             with open(anime_path, "wb") as f:
                 f.write(img_bytes)
             c["anime_ref"] = anime_path
-            print(" ✓")
+            print(f"[CharRefs] #{c['char_id']:02d} {c['role']:<12} ✓")
         else:
             c["anime_ref"] = None
-            print(" ✗ Seedream failed")
+            print(f"[CharRefs] #{c['char_id']:02d} {c['role']:<12} ✗ Seedream failed")
+        return c
 
-        updated.append(c)
+    results: Dict[int, Dict] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_process_one, c): c["char_id"] for c in to_process}
+        for fut in as_completed(futures):
+            c = fut.result()
+            results[c["char_id"]] = c
+
+    # Reconstruct in original order
+    char_map = {c["char_id"]: results.get(c["char_id"], c) for c in characters}
+    updated  = [char_map[c["char_id"]] for c in characters]
 
     n_ok = sum(1 for c in updated if c.get("anime_ref"))
-    print(f"[CharRefs] {n_ok}/{len(updated)} anime refs generated")
+    print(f"[CharRefs] {n_ok}/{len(updated)} anime refs generated (concurrency={max_workers})")
     return updated
 
 

@@ -101,13 +101,14 @@ def _seedream_i2i(
 
 
 def _extract_last_frame(clip_path: str, out_dir: str, clip_id: int) -> Optional[str]:
-    """提取 clip 真正的最后一帧。
+    """提取 clip 末尾区域质量最佳的帧（best-effort，与前向 nudge 逻辑对称）。
 
-    用 accurate seek（-ss 放在 -i 之后），精确定位到 dur-0.05s 附近的真实帧，
-    避免快速 seek（-ss before -i）跳到最近关键帧，也避免 -sseof 极小偏移
-    引发的 mjpeg 编码失败。
+    从 dur-0.1s 开始，按 (0.1, 0.3, 0.5) 退避往前找，选 Laplacian 方差最高的帧。
+    仅全黑/全白帧才彻底跳过；柔焦帧也会被保留（同前向逻辑）。
     """
-    from video_cartoonize.sub_shot_detect import _frame_quality_ok
+    from video_cartoonize.sub_shot_detect import (
+        _frame_quality_ok, BRIGHTNESS_MIN, BRIGHTNESS_MAX, SHARPNESS_THRESHOLD
+    )
 
     cmd_dur = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                "-of", "default=nw=1:nk=1", clip_path]
@@ -116,25 +117,87 @@ def _extract_last_frame(clip_path: str, out_dir: str, clip_id: int) -> Optional[
     except Exception:
         return None
 
-    dst  = os.path.join(out_dir, f"clip_{clip_id:02d}_last_frame.jpg")
-    # 从末尾往前退 0.05s, 0.2s, 0.5s, 1.0s 找清晰帧
-    last_extracted = None
-    for back in (0.05, 0.2, 0.5, 1.0):
+    dst      = os.path.join(out_dir, f"clip_{clip_id:02d}_last_frame.jpg")
+    base, ext = os.path.splitext(dst)
+
+    # 主退避：从末尾往前 0.1/0.3/0.5s，亮度合格才算
+    # 扩展退避：若全部亮度不合格（渐黑/渐白转场），再往前扩 1.0/2.0s 逃出转场区
+    LAST_NUDGE      = (0.1, 0.3, 0.5)
+    LAST_NUDGE_EXT  = (1.0, 2.0)       # 渐黑/渐白时扩展搜索
+
+    best_seek       = None
+    best_lap        = -1.0
+    # 亮度不合格的候选中选"最不黑/最不白"的作兜底（最后的最后用）
+    fallback_seek   = None
+    fallback_mean_dist = 999.0   # 到最佳亮度中心(125)的距离，越小越好
+
+    all_nudges = [(ni, back, False) for ni, back in enumerate(LAST_NUDGE)] + \
+                 [(len(LAST_NUDGE)+ni, back, True) for ni, back in enumerate(LAST_NUDGE_EXT)]
+
+    for ni, back, is_ext in all_nudges:
         seek = max(0.0, dur - back)
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-               "-i", clip_path, "-ss", f"{seek:.3f}",
-               "-frames:v", "1", "-update", "1", dst]
+        tmp  = f"{base}_lnudge{ni}{ext}"
+        cmd  = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-ss", f"{seek:.3f}", "-i", clip_path,
+                "-frames:v", "1", "-pix_fmt", "yuvj420p", "-update", "1", tmp]
         try:
             subprocess.run(cmd, check=True, timeout=60)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             continue
-        if not (os.path.exists(dst) and os.path.getsize(dst) > 0):
+        if not (os.path.exists(tmp) and os.path.getsize(tmp) > 0):
             continue
-        last_extracted = dst
-        if _frame_quality_ok(dst):
-            return dst
-    # 全部不达标但至少有一帧 → 保底返回
-    return last_extracted
+
+        try:
+            import cv2
+            import numpy as np
+            import shutil
+            img = cv2.imread(tmp, cv2.IMREAD_GRAYSCALE)
+            if img is None or img.size == 0:
+                continue
+            mean = float(np.mean(img))
+            lap  = float(cv2.Laplacian(img, cv2.CV_64F).var())
+        except Exception:
+            mean = 128.0
+            lap  = 0.0
+
+        brightness_ok = BRIGHTNESS_MIN < mean < BRIGHTNESS_MAX
+
+        if not brightness_ok:
+            # 记录亮度最接近正常范围的帧作为最终兜底
+            dist = min(abs(mean - BRIGHTNESS_MIN), abs(mean - BRIGHTNESS_MAX))
+            if dist < fallback_mean_dist:
+                fallback_mean_dist = dist
+                fallback_seek      = seek
+                shutil.copy2(tmp, dst)
+            continue   # 亮度不合格，不参与 best_lap 竞争
+
+        if lap > best_lap:
+            best_lap  = lap
+            best_seek = seek
+            shutil.copy2(tmp, dst)
+
+        if lap >= SHARPNESS_THRESHOLD:
+            break   # 已达质量阈值
+
+    # 清理临时文件
+    for ni in range(len(LAST_NUDGE) + len(LAST_NUDGE_EXT)):
+        tmp = f"{base}_lnudge{ni}{ext}"
+        try:
+            os.remove(tmp)
+        except FileNotFoundError:
+            pass
+
+    if best_seek is not None:
+        if best_lap < SHARPNESS_THRESHOLD:
+            print(f"[sub_shot] ⚠ clip {clip_id:02d} last_frame 柔焦"
+                  f"(best_lap={best_lap:.0f}<{SHARPNESS_THRESHOLD:.0f})")
+        return dst
+
+    if fallback_seek is not None:
+        print(f"[sub_shot] ⚠ clip {clip_id:02d} last_frame 全段亮度异常，用最近正常帧兜底")
+        return dst
+
+    return None
 
 
 def _get_duration(clip_path: str) -> float:
@@ -159,6 +222,9 @@ def extract_keyframes(
     默认只取子镜头切换后的首帧（用户定义的"关键帧"）。
     include_last_frame=True 时才追加末帧，且要求与最后一个子镜头帧间隔
     > last_frame_min_gap，避免帧过近引起视频跳变。
+
+    最少保证 2 张关键帧：若提取后只剩 1 张，自动强制追加末帧，让 Seedance
+    有足够的时间轴锚点，不用考虑 last_frame_min_gap。
     """
     clip_frame_dir = os.path.join(out_dir, f"clip_{clip_id:02d}")
     os.makedirs(clip_frame_dir, exist_ok=True)
@@ -167,19 +233,35 @@ def extract_keyframes(
     paths = [p for _t, p in subshot_kfs]
 
     added_last = False
-    if include_last_frame:
+    need_last = include_last_frame or (len(paths) < 2)   # 不足 2 张时强制加末帧
+
+    if need_last:
         dur = _get_duration(clip_path)
-        last_kf_time = subshot_kfs[-1][0] if subshot_kfs else 0.0
+        last_kf_time   = subshot_kfs[-1][0] if subshot_kfs else 0.0
         last_kf_actual = max(0.05, last_kf_time + 0.1)
-        if dur > 0 and (dur - last_kf_actual) > last_frame_min_gap:
+        # 只有 1 张时忽略 gap 限制（哪怕末帧很近也要加，保证最少 2 张）
+        min_gap = last_frame_min_gap if include_last_frame else 0.0
+        if dur > 0 and (dur - last_kf_actual) > min_gap:
             last = _extract_last_frame(clip_path, clip_frame_dir, clip_id)
             if last:
                 paths.append(last)
                 added_last = True
+        elif len(paths) < 2:
+            # gap 太小（短 clip）：直接把中间帧作为第二张
+            mid_t = dur / 2.0 if dur > 0 else 0.5
+            from video_cartoonize.sub_shot_detect import _extract_frame
+            mid_dst = os.path.join(clip_frame_dir,
+                                   f"{Path(clip_path).stem}_mid_t{mid_t:.2f}.jpg")
+            if _extract_frame(clip_path, mid_t, mid_dst):
+                paths.append(mid_dst)
+                added_last = True
 
-    tail = " + 1 last" if added_last else ""
-    print(f"[Phase 2a] clip {clip_id:02d}: {len(paths)} key frame(s) "
-          f"({len(subshot_kfs)} sub-shot first{tail})")
+    suffix = " + 1 last" if added_last else ""
+    if len(paths) < 2 and not added_last:
+        print(f"[Phase 2a] clip {clip_id:02d}: ⚠ only {len(paths)} frame(s) after best-effort")
+    else:
+        print(f"[Phase 2a] clip {clip_id:02d}: {len(paths)} key frame(s) "
+              f"({len(subshot_kfs)} sub-shot first{suffix})")
     return paths
 
 
