@@ -34,13 +34,13 @@ Redis = Annotated[aioredis.Redis, Depends(get_redis)]
 
 def get_credentials(
     ark_api_key: str = Header(default="", alias="X-Ark-Api-Key"),
-    tos_ak: str      = Header(default="", alias="X-Tos-Ak"),
-    tos_sk: str      = Header(default="", alias="X-Tos-Sk"),
+    ark_ak: str      = Header(default="", alias="X-Ark-Ak"),
+    ark_sk: str      = Header(default="", alias="X-Ark-Sk"),
 ) -> dict[str, str]:
     return {
         "ark_api_key": ark_api_key,
-        "tos_ak": tos_ak,
-        "tos_sk": tos_sk,
+        "ark_ak": ark_ak,
+        "ark_sk": ark_sk,
     }
 
 Credentials = Annotated[dict[str, str], Depends(get_credentials)]

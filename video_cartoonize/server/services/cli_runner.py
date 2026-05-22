@@ -30,12 +30,12 @@ def _build_env(credentials: dict[str, str] | None) -> dict[str, str]:
     """构造子进程环境变量：继承父进程环境，叠加凭据。"""
     env = os.environ.copy()
     if credentials:
-        if ak := credentials.get("ark_api_key"):
-            env["ARK_API_KEY"] = ak
-        if tos_ak := credentials.get("tos_ak"):
-            env["TOS_ACCESS_KEY"] = tos_ak
-        if tos_sk := credentials.get("tos_sk"):
-            env["TOS_SECRET_KEY"] = tos_sk
+        if api_key := credentials.get("ark_api_key"):
+            env["ARK_API_KEY"] = api_key
+        if ark_ak := credentials.get("ark_ak"):
+            env["ARK_AK"] = ark_ak
+        if ark_sk := credentials.get("ark_sk"):
+            env["ARK_SK"] = ark_sk
     return env
 
 

@@ -43,8 +43,6 @@ class RegenRequest(BaseModel):
 
 class CredentialVerifyRequest(BaseModel):
     ark_api_key: str
-    tos_ak: str | None = None
-    tos_sk: str | None = None
 
 
 class CredentialResult(BaseModel):
@@ -54,4 +52,3 @@ class CredentialResult(BaseModel):
 
 class CredentialVerifyResponse(BaseModel):
     ark: CredentialResult
-    tos: CredentialResult | None = None

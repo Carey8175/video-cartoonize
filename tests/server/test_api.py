@@ -141,9 +141,7 @@ async def test_verify_empty_key_returns_invalid(client):
     assert data["ark"]["valid"] is False
 
 
-async def test_verify_no_tos_returns_null_tos(client):
-    """When tos_ak/tos_sk not provided, tos field should be null."""
-    # We mock the ARK HTTP call to avoid real network
+async def test_verify_key_returns_ark_result_only(client):
     import unittest.mock as mock
 
     mock_resp = mock.AsyncMock()
@@ -156,7 +154,7 @@ async def test_verify_no_tos_returns_null_tos(client):
         )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["tos"] is None
+    assert data == {"ark": {"valid": True, "error": None}}
 
 
 # ── Jobs ─────────────────────────────────────────────────────────────────────

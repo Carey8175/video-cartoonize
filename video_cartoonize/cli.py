@@ -1705,11 +1705,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     """检查全局安装后的运行环境。"""
     from video_cartoonize.settings import ARK_AK_SK_FILE, ARK_KEY_FILE, CONFIG_DIR, TOS_CREDS_FILE
 
-    has_ak_sk = (
-        bool(os.environ.get("ARK_AK") and os.environ.get("ARK_SK"))
-        or ARK_AK_SK_FILE.exists()
-        or bool(os.environ.get("TOS_ACCESS_KEY") and os.environ.get("TOS_SECRET_KEY"))
-    )
+    has_ark_ak_sk = bool(os.environ.get("ARK_AK") and os.environ.get("ARK_SK")) or ARK_AK_SK_FILE.exists()
+    has_tos_ak_sk = bool(os.environ.get("TOS_ACCESS_KEY") and os.environ.get("TOS_SECRET_KEY"))
     has_bucket = bool(os.environ.get("TOS_BUCKET")) or (
         TOS_CREDS_FILE.exists() and
         bool(json.loads(TOS_CREDS_FILE.read_text()).get("bucket") if TOS_CREDS_FILE.exists() else "")
@@ -1719,16 +1716,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "ffmpeg":      bool(shutil.which("ffmpeg")),
         "ffprobe":     bool(shutil.which("ffprobe")),
         "ark_api_key": bool(os.environ.get("ARK_API_KEY")) or ARK_KEY_FILE.exists(),
-        "ark_ak_sk":   has_ak_sk,   # AK/SK（Assets API + TOS 共用）
-        "tos_bucket":  has_bucket,  # 只需要 bucket 名
+        "ark_ak_sk":   has_ark_ak_sk,
+        "tos_ak_sk":   has_tos_ak_sk,
+        "tos_bucket":  has_bucket,
     }
     _out({
         "status": "ok" if all(checks.values()) else "missing",
         "config_dir": str(CONFIG_DIR),
         "checks": checks,
         "notes": {
-            "ark_ak_sk":  "ARK AK/SK 与 TOS AK/SK 共用同一组密钥",
-            "tos_endpoint": f"默认 tos-ap-southeast-1.volces.com（可在 {TOS_CREDS_FILE} 中覆盖）",
+            "ark_ak_sk":  "ARK AK/SK 用于 ModelArk Assets API，由前端请求 Header 注入或本地配置提供",
+            "tos_ak_sk":  "TOS AK/SK/Bucket 是后端部署配置项，使用 TOS_ACCESS_KEY / TOS_SECRET_KEY / TOS_BUCKET",
+            "tos_endpoint": f"默认 tos-ap-southeast-1.bytepluses.com（可在 {TOS_CREDS_FILE} 中覆盖）",
         },
         "credential_files": {
             "ark_api_key":    str(ARK_KEY_FILE),

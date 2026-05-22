@@ -11,7 +11,7 @@ from typing import Any
 
 import tos
 
-from video_cartoonize.settings import ARK_AK_SK_FILE, TOS_CREDS_FILE
+from video_cartoonize.settings import TOS_CREDS_FILE
 
 # TOS 默认值（BytePlus 国际站，ap-southeast-1）
 _DEFAULT_ENDPOINT = "tos-ap-southeast-1.bytepluses.com"
@@ -23,9 +23,8 @@ def load_credentials() -> dict[str, Any]:
 
     优先级（由高到低）：
       1. 环境变量 TOS_ACCESS_KEY / TOS_SECRET_KEY / TOS_ENDPOINT / TOS_REGION / TOS_BUCKET
-      2. tos_credentials.json（只需填 bucket，其余可省略）
-      3. AK/SK 复用 ark_ak_sk.json（与 Assets API 共用同一组密钥）
-      4. endpoint / region 使用内置默认值
+      2. tos_credentials.json
+      3. endpoint / region 使用内置默认值
     """
     # 读 tos_credentials.json（可只含 bucket）
     creds: dict[str, Any] = {}
@@ -44,19 +43,6 @@ def load_credentials() -> dict[str, Any]:
         if os.environ.get(env_name):
             creds[field] = os.environ[env_name]
 
-    # AK/SK 回退到 ark_ak_sk.json（与 Assets API 共用）
-    if not creds.get("access_key") or not creds.get("secret_key"):
-        if ARK_AK_SK_FILE.exists():
-            try:
-                ark = json.loads(ARK_AK_SK_FILE.read_text(encoding="utf-8"))
-                creds.setdefault("access_key", ark.get("ak") or ark.get("access_key", ""))
-                creds.setdefault("secret_key", ark.get("sk") or ark.get("secret_key", ""))
-            except Exception:
-                pass
-        # 也支持 ARK_AK / ARK_SK 环境变量
-        creds.setdefault("access_key", os.environ.get("ARK_AK", ""))
-        creds.setdefault("secret_key", os.environ.get("ARK_SK", ""))
-
     # endpoint / region 使用默认值
     creds.setdefault("endpoint", _DEFAULT_ENDPOINT)
     creds.setdefault("region",   _DEFAULT_REGION)
@@ -66,7 +52,7 @@ def load_credentials() -> dict[str, Any]:
     if missing:
         raise RuntimeError(
             "缺少 TOS 凭证: " + ", ".join(missing) + "\n"
-            f"请在 {TOS_CREDS_FILE} 中填写 bucket（AK/SK 与 ark_ak_sk.json 共用）。\n"
+            f"请在 {TOS_CREDS_FILE} 中填写 access_key / secret_key / bucket。\n"
             "或设置环境变量 TOS_ACCESS_KEY / TOS_SECRET_KEY / TOS_BUCKET。"
         )
     return creds
