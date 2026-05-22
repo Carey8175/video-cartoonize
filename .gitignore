@@ -41,3 +41,5 @@ deploy/.ca-bundle.pem
 deploy/.zscaler-ca.pem
 deploy/.env
 deploy/config.yaml
+node_modules/
+src/dist/
