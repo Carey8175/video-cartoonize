@@ -54,7 +54,6 @@ async def _verify_tos(ak: str, sk: str) -> CredentialResult:
     """用 TOS SDK 做一次轻量 list_objects 检查权限。"""
     try:
         import tos  # type: ignore
-        from video_cartoonize.server.config import settings
 
         client = tos.TosClientV2(
             ak=ak, sk=sk,

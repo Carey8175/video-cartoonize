@@ -46,7 +46,7 @@ async def subscribe(redis, project_id: str) -> AsyncIterator[str]:
                 msg = await asyncio.wait_for(pubsub.get_message(ignore_subscribe_messages=True), timeout=1.0)
             except asyncio.TimeoutError:
                 # yield heartbeat
-                yield f"event: heartbeat\ndata: {{}}\n\n"
+                yield "event: heartbeat\ndata: {}\n\n"
                 continue
             except asyncio.CancelledError:
                 break

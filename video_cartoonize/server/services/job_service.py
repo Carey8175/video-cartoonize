@@ -22,7 +22,6 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from video_cartoonize.server import state as st_module
 from video_cartoonize.server.db import models as db_models
 from video_cartoonize.server.pipeline.registry import get_step
 from video_cartoonize.server.services import cli_runner, sse_service
@@ -162,8 +161,8 @@ async def _run_job(
 
     # ── SSE 推送最新 state ────────────────────────────────────────────────────
     try:
-        from video_cartoonize.server.config import settings
-        import json, os
+        import json
+        import os
 
         state_path = os.path.join(work_dir, "state.json")
         if os.path.exists(state_path):
@@ -210,7 +209,9 @@ async def _record_seedance_tasks(
     credentials: dict[str, str],
 ) -> None:
     """从 state.json 读取新产生的 task_id，写入 seedance_tasks 历史表。"""
-    import json, os, time as _time
+    import json
+    import os
+    import time as _time
 
     api_key = credentials.get("ark_api_key", "")
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()

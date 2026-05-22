@@ -7,7 +7,7 @@ import mimetypes
 import os
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 
 from video_cartoonize.server.config import settings
 from video_cartoonize.server.deps import WorkDir

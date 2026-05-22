@@ -3,7 +3,6 @@
 """
 from __future__ import annotations
 
-import time
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -40,7 +39,8 @@ async def trigger_step(
 
     # merge 前置检查：所有 clips 必须 done
     if step == "merge":
-        import json, os
+        import json
+        import os
         state_path = os.path.join(work_dir, "state.json")
         with open(state_path) as f:
             state = json.load(f)

@@ -4,7 +4,6 @@ from __future__ import annotations
 import time
 
 from fastapi import APIRouter, HTTPException
-from sqlalchemy import select
 
 from video_cartoonize.server.db import models as db_models
 from video_cartoonize.server.deps import DB, Credentials, Redis, WorkDir, load_state

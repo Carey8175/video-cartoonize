@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from typing import AsyncGenerator
 
 import pytest
@@ -189,27 +188,46 @@ def work_dir(tmp_path):
 
 
 # ── FastAPI test client ───────────────────────────────────────────────────────
+# Use dependency_overrides rather than monkeypatching module-level singletons.
+# settings and async_session are created at import time, so env-var patching
+# after import has no effect. Overriding FastAPI deps is the correct approach.
 
 @pytest_asyncio.fixture
-async def app(db_engine, fake_redis, work_dir, monkeypatch) -> FastAPI:
-    """Test app with overridden DB, Redis, and work_root."""
-    monkeypatch.setenv("WORK_ROOT", str(os.path.dirname(work_dir)))
-    monkeypatch.setenv("REDIS_ENABLED", "false")
-    monkeypatch.setenv(
-        "DATABASE_URL",
-        f"sqlite+aiosqlite:///:memory:",
-    )
-
+async def app(db_engine, fake_redis, work_dir) -> FastAPI:
+    """Test app with dependency-injected DB, Redis, and work_root."""
     from video_cartoonize.server.main import create_app
-    from video_cartoonize.server import db as db_module
-    from video_cartoonize.server.db import engine as engine_module
+    from video_cartoonize.server import deps
 
-    # Patch the engine used by the app
-    session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
-    monkeypatch.setattr(engine_module, "async_session", session_factory)
+    # Build a test session factory from the in-memory engine
+    test_session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    # Override get_db → use in-memory SQLite session
+    async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+        async with test_session_factory() as session:
+            yield session
+
+    # Override get_redis → return FakeRedis
+    async def override_get_redis():
+        return fake_redis
+
+    # Override get_project_work_dir → resolve against our tmp work_dir
+    # project_id == basename of work_dir → return work_dir directly
+    async def override_get_project_work_dir(
+        project_id: str = __import__("fastapi").Path(...),
+    ) -> str:
+        candidate = os.path.join(os.path.dirname(work_dir), project_id)
+        state_path = os.path.join(candidate, "state.json")
+        if not os.path.exists(state_path):
+            from fastapi import HTTPException
+            raise HTTPException(404, f"Project {project_id!r} not found")
+        return candidate
 
     application = create_app()
     application.state.redis = fake_redis
+
+    application.dependency_overrides[deps.get_db] = override_get_db
+    application.dependency_overrides[deps.get_redis] = override_get_redis
+    application.dependency_overrides[deps.get_project_work_dir] = override_get_project_work_dir
 
     return application
 

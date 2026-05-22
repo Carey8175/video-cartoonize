@@ -1,7 +1,5 @@
 """Tests for state_adapter — the CLI schema compatibility layer."""
-import pytest
 from video_cartoonize.server.services.state_adapter import (
-    SUPPORTED_VERSIONS,
     state_to_project_view,
     _build_subshots_from_paths,
 )
@@ -47,7 +45,7 @@ def test_merged_true_when_final_video_set(tmp_path):
     final = tmp_path / "final" / "merged.mp4"
     final.parent.mkdir()
     final.write_bytes(b"fake")
-    import copy, os
+    import copy
     state = copy.deepcopy(MINIMAL_STATE)
     state["final_video"] = str(final)
     view = state_to_project_view(state, PROJECT_ID, str(tmp_path))

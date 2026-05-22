@@ -5,10 +5,8 @@ Uses httpx AsyncClient against the real FastAPI app with:
   - FakeRedis
   - Temp work_dir with a real state.json
 """
-import json
 import os
 import pytest
-import pytest_asyncio
 
 pytestmark = pytest.mark.asyncio
 
@@ -147,7 +145,6 @@ async def test_verify_no_tos_returns_null_tos(client):
     """When tos_ak/tos_sk not provided, tos field should be null."""
     # We mock the ARK HTTP call to avoid real network
     import unittest.mock as mock
-    import httpx
 
     mock_resp = mock.AsyncMock()
     mock_resp.status_code = 200

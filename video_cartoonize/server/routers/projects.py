@@ -4,12 +4,10 @@ from __future__ import annotations
 import json
 import os
 import time
-from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from sqlalchemy import select
 
-from video_cartoonize.server.config import settings
 from video_cartoonize.server.db import models as db_models
 from video_cartoonize.server.deps import DB, WorkDir, load_state
 from video_cartoonize.server.schemas.project import ProjectSummary, ProjectView

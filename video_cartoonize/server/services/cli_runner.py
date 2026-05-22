@@ -18,7 +18,6 @@ import asyncio
 import logging
 import os
 import shutil
-import sys
 from typing import AsyncIterator
 
 logger = logging.getLogger(__name__)

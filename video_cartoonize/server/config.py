@@ -1,7 +1,6 @@
 """Server configuration — 全部通过环境变量覆盖，零魔法。"""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
