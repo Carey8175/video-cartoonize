@@ -3,12 +3,14 @@ name: video-cartoonize
 description: >
   End-to-end real-video → anime/manga-style video pipeline driven by the
   `cartoonize` CLI. Splits a live-action video into clips, extracts key frames
-  (sub-shot first frames + last frame) per clip, converts them to cartoon style
-  via Seedream 5.0 I2I, generates per-clip Seedance prompts via Seed 2.0 Lite
-  video analysis, uploads everything through the ModelArk Assets API (required
-  to bypass privacy filter), submits each clip to Seedance 2.0 with key frame
-  cartoon refs + multi-beat prompt, muxes original audio back, and merges all
-  clips into one final video.
+  (sub-shot first frames + last frame) per clip, identifies recurring characters
+  with InsightFace, generates anime character references for protagonists and
+  supporting roles, converts key frames to cartoon style via Seedream 5.0 I2I
+  with per-frame character refs, generates per-clip Seedance prompts via Seed
+  2.0 Lite video analysis, uploads everything through the ModelArk Assets API
+  (required to bypass privacy filter), submits each clip to Seedance 2.0 with
+  key frame cartoon refs + multi-beat prompt, muxes original audio back, and
+  merges all clips into one final video.
 
   Use this skill whenever the user mentions: cartoonize video, video
   cartoonization, 视频卡通化, 卡通化视频, cartoon style video, 动漫风格视频,
@@ -81,7 +83,13 @@ cartoonize split       → Phase 1: 场景切分 + 像素缩放
 cartoonize keyframes   → Phase 2a: 子镜头关键帧提取
     │                    ★ 检查 keyframes/ 目录，确认关键帧合理再继续
     ▼
-cartoonize cartoon  ──┐ Phase 2b: Seedream I2I 卡通化
+cartoonize identify    → Phase 2a-opt: InsightFace 人物识别 + 主角/配角/路人分类 + keyframe 角色映射
+    │                    ★ 新流程必须跑；首次会下载 buffalo_l 模型，需 insightface/onnxruntime
+    ▼
+cartoonize char-refs   → Phase 2a-opt: Seedream I2I 生成主角/配角动漫参考图
+    │                    ★ 后续 cartoon 会自动给对应 keyframe 注入角色参考图，提升人物一致性
+    ▼
+cartoonize cartoon  ──┐ Phase 2b: Seedream I2I 卡通化（自动使用角色 refs）
 cartoonize vlm      ──┘ Phase 3:  VLM 场景分析      ← 两个可以并行启动
     │
     ▼
@@ -148,6 +156,17 @@ Phase 2a 提取的关键帧（子镜头首帧 + 片尾帧）直接影响 Seedrea
 attempt 2 / 3 自动重试，poll 会**同步**跑 ffmpeg 抽新帧 + Seedream I2I 画新帧 +
 TOS/Assets 上传，单次调用可能 30-90s。`while ! cartoonize poll; do sleep 30; done`
 循环仍然正常工作，只是某一次会停顿一下。
+
+### #5 — 新流程必须先做人脸/角色一致性（0.14.10+）
+
+`cartoonize identify` 会用 InsightFace 从原视频采样做人脸检测与聚类，把角色分为
+protagonist / supporting / extra，并把每张 keyframe 映射到出现的主角/配角。
+`cartoonize char-refs` 会为主角/配角生成动漫角色参考图。之后 `cartoonize cartoon`
+会自动给对应 keyframe 注入这些角色参考图，提升跨镜头人物一致性。
+
+首次运行 `identify` 可能自动下载 InsightFace `buffalo_l` 模型（约 300MB），并要求
+本地环境已安装 `insightface` 和 `onnxruntime`。如果缺依赖，先在 cartoonize 的 venv
+里安装它们，不要跳过人物流程。
 
 ---
 
@@ -239,7 +258,57 @@ cartoonize keyframes --work-dir ./my_output
 
 ---
 
-### Step 2b–5a — 流水线 + 收割模式（★ 必须使用）
+### Step 2b — 人物识别 + 角色参考图（0.14.10+，★ 新流程必须使用）
+
+先运行人物识别。它会从原视频采样，用 InsightFace 聚类人脸，分类主角/配角/路人，
+并在 keyframes 已存在时生成 `char_keyframe_map`：
+
+```bash
+cartoonize identify --work-dir ./my_output
+```
+
+输出：
+```json
+{
+  "status": "ok",
+  "protagonists": 1,
+  "supporting": 2,
+  "total_chars": 5,
+  "kf_mapped_clips": 12,
+  "characters": [
+    {"char_id": 0, "role": "protagonist", "freq": 0.42, "face_ref": ".../characters/char_00_face.jpg"}
+  ]
+}
+```
+
+再为主角/配角生成动漫角色参考图：
+
+```bash
+cartoonize char-refs --work-dir ./my_output
+```
+
+输出：
+```json
+{
+  "status": "ok",
+  "generated": 3,
+  "total": 5,
+  "characters": [
+    {"char_id": 0, "role": "protagonist", "anime_ref": ".../characters/char_00_anime.jpg"}
+  ]
+}
+```
+
+**判断与注意：**
+- `identify` 依赖 `insightface` + `onnxruntime`；缺依赖时先安装，不要跳过新流程。
+- 首次运行会下载 InsightFace `buffalo_l` 模型，耗时较长属于正常。
+- `identify` 最好在 `keyframes` 之后跑；如果先跑了 identify，需在 keyframes 后重跑一次 identify，以生成 `char_keyframe_map`。
+- `char-refs` 只会为 protagonist/supporting 生成参考图，extra 不生成。
+- 后续 `cartoonize run --clip-id N` 内部调用 `cartoon` 时，会自动读取 `characters` + `char_keyframe_map`，给对应 keyframe 注入角色动漫参考图；agent 不需要手动传参数。
+
+---
+
+### Step 2c–5a — 流水线 + 收割模式（★ 必须使用）
 
 **Agent 唯一需要调度的命令是 `cartoonize run --clip-id N`**——它一站式跑 cartoon+vlm+upload+submit，返回 task_id。
 
@@ -561,7 +630,7 @@ poll 在补齐时会在事件日志写 `poll.retry_keyframe_topup`，含 `strate
 > resubmit Seedance（attempt 3 切 image-only）→ 6) 3 次都失败用最后一次作 fallback。
 >
 > Agent 唯一要做的是 **`cartoonize poll --clip-id N` exit 0 = done，exit 1 = sleep 30s 再来一次**。
-> 见 Step 2b–5a 的调度伪代码：poll 是一次性非阻塞调用，每隔 30s 唤醒一次即可
+> 见 Step 2c–5a 的调度伪代码：poll 是一次性非阻塞调用，每隔 30s 唤醒一次即可
 > （0.14.6+ 在触发 append 时单次 poll 可能停顿 30-90s 做 Seedream，属于正常）。
 
 ---
