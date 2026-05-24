@@ -101,103 +101,19 @@ def _seedream_i2i(
 
 
 def _extract_last_frame(clip_path: str, out_dir: str, clip_id: int) -> Optional[str]:
-    """提取 clip 末尾区域质量最佳的帧（best-effort，与前向 nudge 逻辑对称）。
+    """提取 clip 尾帧，严格取最后一帧。
 
-    从 dur-0.1s 开始，按 (0.1, 0.3, 0.5) 退避往前找，选 Laplacian 方差最高的帧。
-    仅全黑/全白帧才彻底跳过；柔焦帧也会被保留（同前向逻辑）。
+    不再选择末尾区域的"最清晰"帧，避免改变剧情时间点。只有最后一帧全黑或全白
+    时，才逐帧向前回退，直到找到亮度正常的帧。
     """
-    from video_cartoonize.sub_shot_detect import (
-        _frame_quality_ok, BRIGHTNESS_MIN, BRIGHTNESS_MAX, SHARPNESS_THRESHOLD
-    )
+    from video_cartoonize.sub_shot_detect import _extract_fixed_endpoint_frame
 
-    cmd_dur = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-               "-of", "default=nw=1:nk=1", clip_path]
-    try:
-        dur = float(subprocess.check_output(cmd_dur, text=True, timeout=30).strip())
-    except Exception:
+    dst = os.path.join(out_dir, f"clip_{clip_id:02d}_last_frame.jpg")
+    seek = _extract_fixed_endpoint_frame(clip_path, dst, endpoint="last")
+    if seek is None:
         return None
-
-    dst      = os.path.join(out_dir, f"clip_{clip_id:02d}_last_frame.jpg")
-    base, ext = os.path.splitext(dst)
-
-    # 主退避：从末尾往前 0.1/0.3/0.5s，亮度合格才算
-    # 扩展退避：若全部亮度不合格（渐黑/渐白转场），再往前扩 1.0/2.0s 逃出转场区
-    LAST_NUDGE      = (0.1, 0.3, 0.5)
-    LAST_NUDGE_EXT  = (1.0, 2.0)       # 渐黑/渐白时扩展搜索
-
-    best_seek       = None
-    best_lap        = -1.0
-    # 亮度不合格的候选中选"最不黑/最不白"的作兜底（最后的最后用）
-    fallback_seek   = None
-    fallback_mean_dist = 999.0   # 到最佳亮度中心(125)的距离，越小越好
-
-    all_nudges = [(ni, back, False) for ni, back in enumerate(LAST_NUDGE)] + \
-                 [(len(LAST_NUDGE)+ni, back, True) for ni, back in enumerate(LAST_NUDGE_EXT)]
-
-    for ni, back, is_ext in all_nudges:
-        seek = max(0.0, dur - back)
-        tmp  = f"{base}_lnudge{ni}{ext}"
-        cmd  = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-ss", f"{seek:.3f}", "-i", clip_path,
-                "-frames:v", "1", "-pix_fmt", "yuvj420p", "-update", "1", tmp]
-        try:
-            subprocess.run(cmd, check=True, timeout=60)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            continue
-        if not (os.path.exists(tmp) and os.path.getsize(tmp) > 0):
-            continue
-
-        try:
-            import cv2
-            import numpy as np
-            import shutil
-            img = cv2.imread(tmp, cv2.IMREAD_GRAYSCALE)
-            if img is None or img.size == 0:
-                continue
-            mean = float(np.mean(img))
-            lap  = float(cv2.Laplacian(img, cv2.CV_64F).var())
-        except Exception:
-            mean = 128.0
-            lap  = 0.0
-
-        brightness_ok = BRIGHTNESS_MIN < mean < BRIGHTNESS_MAX
-
-        if not brightness_ok:
-            # 记录亮度最接近正常范围的帧作为最终兜底
-            dist = min(abs(mean - BRIGHTNESS_MIN), abs(mean - BRIGHTNESS_MAX))
-            if dist < fallback_mean_dist:
-                fallback_mean_dist = dist
-                fallback_seek      = seek
-                shutil.copy2(tmp, dst)
-            continue   # 亮度不合格，不参与 best_lap 竞争
-
-        if lap > best_lap:
-            best_lap  = lap
-            best_seek = seek
-            shutil.copy2(tmp, dst)
-
-        if lap >= SHARPNESS_THRESHOLD:
-            break   # 已达质量阈值
-
-    # 清理临时文件
-    for ni in range(len(LAST_NUDGE) + len(LAST_NUDGE_EXT)):
-        tmp = f"{base}_lnudge{ni}{ext}"
-        try:
-            os.remove(tmp)
-        except FileNotFoundError:
-            pass
-
-    if best_seek is not None:
-        if best_lap < SHARPNESS_THRESHOLD:
-            print(f"[sub_shot] ⚠ clip {clip_id:02d} last_frame 柔焦"
-                  f"(best_lap={best_lap:.0f}<{SHARPNESS_THRESHOLD:.0f})")
-        return dst
-
-    if fallback_seek is not None:
-        print(f"[sub_shot] ⚠ clip {clip_id:02d} last_frame 全段亮度异常，用最近正常帧兜底")
-        return dst
-
-    return None
+    print(f"[sub_shot] clip {clip_id:02d} last_frame fixed t={seek:.2f}")
+    return dst
 
 
 def _get_duration(clip_path: str) -> float:

@@ -104,16 +104,113 @@ def _probe_duration(clip_path: str) -> float:
         return 0.0
 
 
+def _probe_frame_interval(clip_path: str) -> float:
+    """Best-effort frame interval in seconds, defaulting to 25fps."""
+    try:
+        import json
+        out = subprocess.check_output(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=avg_frame_rate,r_frame_rate",
+             "-of", "json", clip_path],
+            text=True,
+            timeout=10,
+        )
+        data = json.loads(out)
+        stream = (data.get("streams") or [{}])[0]
+        rate = stream.get("avg_frame_rate") or stream.get("r_frame_rate") or ""
+        if "/" in rate:
+            num, den = rate.split("/", 1)
+            fps = float(num) / float(den)
+        else:
+            fps = float(rate)
+        if fps > 0:
+            return 1.0 / fps
+    except Exception:
+        pass
+    return 1.0 / 25.0
+
+
+def _brightness_ok(img_path: str) -> bool:
+    """True unless the image is effectively all black or all white."""
+    try:
+        import cv2
+        import numpy as np
+        img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+        if img is None or img.size == 0:
+            return False
+        mean = float(np.mean(img))
+        return BRIGHTNESS_MIN < mean < BRIGHTNESS_MAX
+    except Exception:
+        return True
+
+
+def _extract_fixed_endpoint_frame(
+    clip_path: str,
+    dst: str,
+    *,
+    endpoint: str,
+    max_shift_s: float = 2.0,
+) -> Optional[float]:
+    """Extract a fixed first/last frame, only shifting past black/white frames.
+
+    Unlike sub-shot boundary extraction, endpoints must not choose the sharpest
+    nearby frame: that changes story timing.  Start at the true first/last frame
+    and move one frame at a time only when the frame is essentially all black or
+    all white. Returns the actual seek time used.
+    """
+    duration = _probe_duration(clip_path)
+    frame_dt = _probe_frame_interval(clip_path)
+    if duration <= 0:
+        duration = frame_dt
+
+    if endpoint == "first":
+        start = 0.0
+        direction = 1.0
+    elif endpoint == "last":
+        start = max(0.0, duration - frame_dt)
+        direction = -1.0
+    else:
+        raise ValueError(f"unsupported endpoint: {endpoint}")
+
+    max_steps = max(1, int(max_shift_s / frame_dt))
+    base, ext = os.path.splitext(dst)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+    for step in range(max_steps + 1):
+        seek = start + direction * frame_dt * step
+        seek = max(0.0, min(seek, max(0.0, duration - frame_dt)))
+        tmp = f"{base}_{endpoint}_fixed{step}{ext}"
+        if not _extract_frame(clip_path, seek, tmp):
+            continue
+
+        if _brightness_ok(tmp):
+            import shutil
+            shutil.copy2(tmp, dst)
+            for old in Path(os.path.dirname(dst)).glob(f"{Path(base).name}_{endpoint}_fixed*{ext}"):
+                try:
+                    os.remove(old)
+                except FileNotFoundError:
+                    pass
+            return seek
+
+        try:
+            os.remove(tmp)
+        except FileNotFoundError:
+            pass
+
+    return None
+
+
 def _extract_at_timestamps(
     clip_path: str,
     out_dir: str,
     timestamps: List[float],
 ) -> List[Tuple[float, str]]:
-    """Extract first quality-OK frame at each requested timestamp.
+    """Extract a key frame at each requested timestamp.
 
-    Shared body of all sub-shot keyframe strategies. For each `t`, nudges
-    forward by NUDGE_CANDIDATES and picks the first sharp / well-exposed frame.
-    Returns list of (requested_t, dst_path) for frames that landed successfully.
+    The true clip first frame is fixed at t=0 unless it is black/white. Other
+    sub-shot boundaries still use the nudge candidates and choose the clearest
+    non-black/non-white frame.
     """
     os.makedirs(out_dir, exist_ok=True)
     out: List[Tuple[float, str]] = []
@@ -121,6 +218,16 @@ def _extract_at_timestamps(
 
     for i, t in enumerate(timestamps):
         dst = str(Path(out_dir) / f"{clip_stem}_sub{i:02d}_t{t:.2f}.jpg")
+
+        if abs(t) < 1e-3:
+            seek = _extract_fixed_endpoint_frame(clip_path, dst, endpoint="first")
+            if seek is not None:
+                if seek > 1e-3:
+                    print(f"[sub_shot] ⚠ first frame at t=0.00 is black/white, shifted to t={seek:.2f}")
+                out.append((t, dst))
+            else:
+                print("[sub_shot] ✗ first frame extraction failed")
+            continue
 
         # best-effort: 尝试所有 nudge，选 Laplacian 方差最大的帧（最清晰）。
         # 不再做 pass/fail 二选一——柔焦/慢镜拍摄的帧 Laplacian 可能本来就低，
