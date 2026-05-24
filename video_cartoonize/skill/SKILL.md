@@ -308,68 +308,75 @@ cartoonize char-refs --work-dir ./my_output
 
 ---
 
-### Step 2c–5a — 流水线 + 收割模式（★ 必须使用）
+### Step 2c–5a — 两阶段提交 + 收割模式（★ 必须使用）
 
 **Agent 唯一需要调度的命令是 `cartoonize run --clip-id N`**——它一站式跑 cartoon+vlm+upload+submit，返回 task_id。
 
 ```
-工作流 A：主动推进（限并发 6）
+阶段 A：只提交，不 poll（限并发 6）
   cartoonize run --clip-id N    ← 内部并行 cartoon+vlm, 串行 upload→submit
   ↓ 返回 {task_id, mode}
-  clip 进入 "awaiting_poll" 池
+  clip 获得 task_id
 
-工作流 B：被动收割（每次循环 30s 一次，不阻塞）
-  cartoonize poll               ← 一次性查所有任务状态
-    ↓ 已 succeeded 的 clip
-  cartoonize verify --clip-id N
-    ↓ pass → 完成
-    ↓ fail → 把 clip 重新放回工作流 A 入口（重试，最多 3 次）
+阶段 B：所有 clip 都已提交后，再统一收割
+  cartoonize poll --clip-id N   ← 对所有 pending clip 轮询；CLI 内部自动 verify + retry
+    ↓ exit 0 → clip done（pass 或 fallback）
+    ↓ exit 1 → clip still running（下轮继续）
 ```
 
-**核心原则：** `poll` 是一次性查询、秒级返回，不阻塞。每轮调度循环时调用一次 poll 收割已完成的任务，**绝不要 `until cartoonize poll; do sleep 30; done` 卡死**。
+**核心原则：** 阶段 A 只负责把所有 clip 尽快提交到 Seedance 队列。不要在提交阶段穿插
+`poll`，因为 `cartoonize poll --clip-id N` 可能触发 verify 失败后的关键帧补齐、
+Seedream I2I、Assets 上传和自动 resubmit，单次会卡 30-180s，拖慢后续 clip 的提交。
+等全部 clip 都有 `task_id` 后，再进入阶段 B 做全量收割。
+
+这里的“poll all”是指 agent 遍历所有 pending clip 执行
+`cartoonize poll --clip-id N`。不要依赖无 `--clip-id` 的 `cartoonize poll` 做最终收割：
+无 `--clip-id` 是旧的状态查询模式，只查 Seedance 状态，不集成 verify / retry。
 
 #### ★ 并发控制规则
 
 | 项 | 限制 |
 |---|---|
-| 工作流 A 中"in-flight"的 clip（cartoon/vlm/upload/submit 任一阶段）| **最多 6 个同时** |
-| awaiting_poll 池大小 | 不限（Seedance 服务端自己排队）|
-| poll 调用频率 | 每完成一个工作流 A 调用一次；额外定期（30s）调用一次兜底 |
-| verify 并发 | 完成的 clip 立即 verify，无需限并发 |
+| 阶段 A 的 `cartoonize run` 并发 | **最多 6 个同时** |
+| 阶段 A 是否 poll | **不要 poll**，只提交所有未提交 clip |
+| Seedance 队列大小 | 不限，全部提交给服务端排队 |
+| 阶段 B 的 poll 方式 | 遍历 pending clip，逐个 `cartoonize poll --clip-id N` |
+| poll 轮次间隔 | 每轮 sweep 后 sleep 30s；单个 poll 可能因 retry 耗时 30-180s |
+| verify / retry | 由 `poll --clip-id` 内部处理，agent 不直接调 `verify` |
 
 #### Agent 调度伪代码（极简：只用 run + poll，2 个 exit code）
 
 ```python
 N = 6
-todo     = list(range(total_clips))
-stage1   = {}                          # cid → BackgroundTask
-awaiting = set()                       # 已 run 完, 等 poll 返回 done
-done     = {}                          # cid → video_url
+all_clips = list(range(total_clips))
 
-while todo or stage1 or awaiting:
-    # 1. 填充工作流 A（每个 clip 一行命令）
-    while len(stage1) < N and todo:
-        cid = todo.pop(0)
-        stage1[cid] = run_in_background(
-            f"cartoonize run --work-dir ./out --clip-id {cid}"
-        )
+# Phase A: submit everything first. Do not poll in this phase.
+todo = [cid for cid in all_clips if not state.clip[cid].task_id]
+while todo:
+    batch = pop_up_to(todo, N)
+    results = run_in_parallel([
+        f"cartoonize run --work-dir ./out --clip-id {cid}"
+        for cid in batch
+    ])
+    retry_once_for_failed_runs(results)
 
-    # 2. run 完成 → 进 awaiting 池
-    for cid in list(stage1):
-        if stage1[cid].is_done():
-            del stage1[cid]
-            awaiting.add(cid)
+# Phase B: sweep all pending clips until all have output_url.
+while True:
+    pending = [
+        cid for cid in all_clips
+        if state.clip[cid].status != "success" or not state.clip[cid].output_url
+    ]
+    if not pending:
+        break
 
-    # 3. poll（CLI 自己处理 verify + 重试，agent 只看 done/running）
-    for cid in list(awaiting):
-        res = cartoonize_poll(clip_id=cid)
-        if res.exit == 0:           # done
-            done[cid] = res.json["video_url"]
-            awaiting.discard(cid)
-        # exit == 1: running（包括 CLI 内部自动 resubmit 后还在跑），留在 awaiting
+    for cid in pending:
+        res = run(f"cartoonize poll --work-dir ./out --clip-id {cid}")
+        if res.exit == 0:
+            mark_done(cid)          # pass 或 fallback 都算 done
+        else:
+            keep_for_next_sweep(cid)
 
-    if stage1 or awaiting:
-        sleep(30)
+    sleep(30)
 ```
 
 > **`cartoonize poll --clip-id N` 是 agent 唯一需要的查询命令**。CLI 内部已集成：
@@ -383,19 +390,19 @@ while todo or stage1 or awaiting:
 #### Bash 极简版
 
 ```bash
-# 启动 6 个 clip
-for cid in 0 1 2 3 4 5; do
-  cartoonize run --work-dir ./out --clip-id $cid &
-done
-wait
+# Phase A: 提交所有 clip，限制 6 并发。这里不要 poll。
+TOTAL_CLIPS=$(python3 -c 'import json; print(len(json.load(open("./out/state.json"))["clips"]))')
+printf '%s\n' $(seq 0 $((TOTAL_CLIPS - 1))) | xargs -P6 -I{} \
+  cartoonize run --work-dir ./out --clip-id {}
 
-# poll 每个 clip 直到 done（CLI 自动处理 retry）
-for cid in 0 1 2 3 4 5; do
-  while true; do
-    cartoonize poll --work-dir ./out --clip-id $cid
-    [ $? -eq 0 ] && break
-    sleep 30
+# Phase B: 全量 sweep。每轮遍历所有未完成 clip 的 --clip-id poll。
+while true; do
+  remaining=0
+  for cid in $(seq 0 $((TOTAL_CLIPS - 1))); do
+    cartoonize poll --work-dir ./out --clip-id "$cid" || remaining=1
   done
+  [ "$remaining" -eq 0 ] && break
+  sleep 30
 done
 ```
 
@@ -522,7 +529,11 @@ cartoonize submit --work-dir ./my_output
 cartoonize poll --work-dir ./my_output
 ```
 
-**一次性查询**，不阻塞。  
+**无 `--clip-id` 是旧的全量状态查询模式，只查询 Seedance 任务状态，不做 VLM verify，也不触发自动 retry。**
+Agent 不应把它作为最终收割入口。最终收割请按 Step 2c 的阶段 B，遍历 pending clip 调
+`cartoonize poll --work-dir ./my_output --clip-id N`。
+
+无 `--clip-id` 的返回语义：
 - exit 0 = 全部任务已终结（success 或 failed）  
 - exit 1 = 仍有任务运行中
 
@@ -539,13 +550,16 @@ cartoonize poll --work-dir ./my_output
 }
 ```
 
-**Agent 轮询逻辑：**
+**Agent 最终收割逻辑（推荐）：**
 
 ```
 loop:
-  run: cartoonize poll --work-dir ./my_output
-  if exit_code == 0:
-    break               ← 全部完成，继续下一步
+  pending = state.json 中 status != success 或 output_url 为空的 clip
+  if pending is empty:
+    break
+  for each cid in pending:
+    run: cartoonize poll --work-dir ./my_output --clip-id cid
+    # exit 0 = 该 clip done；exit 1 = 仍运行或内部已自动 resubmit
   wait 30 seconds
   goto loop
 ```
@@ -555,17 +569,20 @@ Seedance 一般每个 clip 需 2–5 分钟，10 个 clip 约 10–20 分钟。
 
 ---
 
-### Step 5c — VLM 风格校验（最多重试 3 次）
+### Step 5c — VLM 风格校验（自动；手动命令仅调试）
 
 ```bash
 cartoonize verify --work-dir ./my_output
 ```
 
-让 VLM 看一遍 Seedance 生成的视频，判断是不是动漫/卡通风格：
+Agent 正常流水线不要直接调用 `verify`。从 0.14.6 起，`cartoonize poll --clip-id N`
+已经集成 VLM 风格校验和自动重试；`verify` 只保留给人工调试旧项目使用。
+
+自动校验逻辑会让 VLM 看一遍 Seedance 生成的视频，判断是不是动漫/卡通风格：
 
 - **通过** → `style_verified=true`，进入下一步
-- **不通过** 且 `verify_attempts < 3` → 清除 `task_id`、status 置回 `pending`，
-  agent 重新走 `submit → poll → verify`。**`output_url` 不会被清空**，
+- **不通过** 且 `verify_attempts < 3` → `poll --clip-id` 内部自动补关键帧并 resubmit。
+  **`output_url` 不会被清空**，
   作为兜底视频保留；每一次的 task_id / output_url / 判定结果都会归档到
   `clip.attempts[]` 数组里
 - **不通过** 且 `verify_attempts = 3` → 不再重试，`output_url` 和 `task_id`
@@ -630,8 +647,8 @@ poll 在补齐时会在事件日志写 `poll.retry_keyframe_topup`，含 `strate
 > resubmit Seedance（attempt 3 切 image-only）→ 6) 3 次都失败用最后一次作 fallback。
 >
 > Agent 唯一要做的是 **`cartoonize poll --clip-id N` exit 0 = done，exit 1 = sleep 30s 再来一次**。
-> 见 Step 2c–5a 的调度伪代码：poll 是一次性非阻塞调用，每隔 30s 唤醒一次即可
-> （0.14.6+ 在触发 append 时单次 poll 可能停顿 30-90s 做 Seedream，属于正常）。
+> 见 Step 2c–5a 的两阶段调度：先把所有 clip run 提交完，再对 pending clips 做 poll sweep。
+> （0.14.6+ 在触发 append 时单次 poll 可能停顿 30-180s 做 Seedream / Assets 上传，属于正常）。
 
 ---
 
